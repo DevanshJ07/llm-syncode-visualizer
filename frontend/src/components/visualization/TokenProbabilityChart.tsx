@@ -81,7 +81,8 @@ export function TokenProbabilityChart({
       isSelected: t.token_id === selectedTokenId,
     }));
 
-  const barHeight = 22;
+  // 18px per bar keeps 20 candidates in ~380px — avoids overflow
+  const barHeight = 18;
   const chartHeight = data.length * barHeight + 24;
 
   return (

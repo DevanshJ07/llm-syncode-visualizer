@@ -18,7 +18,7 @@ export interface TopToken {
   token_id: number;    // vocabulary index
 }
 
-/** Legacy candidate model kept for future Syncode phase. */
+/** Extended candidate model for Syncode before/after distributions. */
 export interface TokenCandidate {
   token_id: number;
   token_str: string;
@@ -27,12 +27,19 @@ export interface TokenCandidate {
   is_selected: boolean;
 }
 
+/** A token rejected by Syncode grammar masking, carrying its raw probability. */
+export interface MaskedTokenEntry {
+  token: string;
+  token_id: number;
+  raw_prob: number;
+}
+
 export interface DecodingStep {
   step: number;
   /** Decoded text generated before this step (context fed into the model). */
   context: string;
 
-  // --- Real generation fields (Phase 2) ---
+  // --- Real generation fields ---
   /** Top-k candidates ranked by probability (after temperature scaling). */
   top_tokens: TopToken[];
   /** The token chosen by greedy decoding (argmax). */
@@ -42,12 +49,20 @@ export interface DecodingStep {
   /** Shannon entropy H = -Σ p·log(p) over the full vocabulary distribution. */
   entropy_before: number | null;
 
-  // --- Syncode fields (Phase 3, empty until Syncode is implemented) ---
+  // --- Syncode fields ---
   top_tokens_before_syncode: TokenCandidate[];
-  masked_tokens: number[];
+  /** Rejected tokens with their raw probabilities (Syncode mode only). */
+  masked_tokens: MaskedTokenEntry[];
   valid_tokens_after_syncode: TokenCandidate[];
   entropy_after: number | null;
   num_masked: number;
+
+  // --- Syncode masking statistics per step ---
+  vocab_size: number;
+  valid_token_count: number;
+  masked_token_count: number;
+  masked_percentage: number;
+  probability_mass_removed: number;
 }
 
 export interface ExperimentResult {

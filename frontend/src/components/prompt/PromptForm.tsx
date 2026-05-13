@@ -30,7 +30,7 @@ export function PromptForm({ onSubmit, isLoading, error }: Props) {
   const [useSyncode, setUseSyncode] = useState(false);
   const [showSettings, setShowSettings] = useState(false);
   const [settings, setSettings] = useState<Omit<GenerateRequest, "prompt" | "use_syncode">>({
-    top_k: 10,
+    top_k: 20,
     max_new_tokens: 64,
     temperature: 1.0,
   });

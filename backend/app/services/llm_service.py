@@ -10,7 +10,7 @@ import torch
 import torch.nn.functional as F
 
 from app.core.config import settings
-from app.models.schemas import DecodingStep, TokenCandidate, TopToken
+from app.models.schemas import DecodingStep, MaskedTokenEntry, TokenCandidate, TopToken
 
 if TYPE_CHECKING:
     from transformers import PreTrainedModel, PreTrainedTokenizerBase
@@ -278,18 +278,17 @@ class LLMService:
             # Greedy selection from the CONSTRAINED distribution.
             selected_id: int = int(torch.argmax(probs_masked))
 
-            # A token is "masked" if it was valid in raw logits but set to -inf
-            # by Syncode.  We report only those appearing in the raw top-k so
-            # the frontend payload stays small.
+            # Boolean mask: True where Syncode set a token to -inf.
+            # "grammar-invalid" = was finite in raw logits but -inf after masking.
             masked_flag: torch.Tensor = (
                 (masked_logits == float("-inf")) & (logits > float("-inf"))
             )
-            masked_in_topk: list[int] = [
-                int(topk_raw_ids[i])
-                for i in range(k)
-                if masked_flag[int(topk_raw_ids[i])]
-            ]
             num_masked_total: int = int(masked_flag.sum())
+            vocab_sz: int = int(logits.size(0))
+            valid_cnt: int = vocab_sz - num_masked_total
+
+            # Probability mass removed = Σ raw_prob of all masked tokens.
+            prob_mass_removed: float = float(probs_raw[masked_flag].sum())
 
             # top_tokens_before_syncode — raw top-k with is_masked annotation
             top_tokens_before_syncode: list[TokenCandidate] = [
@@ -305,6 +304,22 @@ class LLMService:
                     is_selected=int(topk_raw_ids[i]) == selected_id,
                 )
                 for i in range(k)
+            ]
+
+            # masked_tokens — top-k rejected tokens from raw distribution,
+            # with their raw probabilities for the "Masked Tokens" panel.
+            masked_in_topk: list[MaskedTokenEntry] = [
+                MaskedTokenEntry(
+                    token_id=int(topk_raw_ids[i]),
+                    token=self._tokenizer.decode(  # type: ignore[union-attr]
+                        [int(topk_raw_ids[i])],
+                        skip_special_tokens=False,
+                        clean_up_tokenization_spaces=False,
+                    ),
+                    raw_prob=float(topk_raw_probs[i]),
+                )
+                for i in range(k)
+                if masked_flag[int(topk_raw_ids[i])]
             ]
 
             # valid_tokens_after_syncode — top-k from the constrained distribution
@@ -333,6 +348,9 @@ class LLMService:
             valid_tokens_after_syncode = []
             masked_in_topk = []
             num_masked_total = 0
+            vocab_sz = int(logits.size(0))
+            valid_cnt = vocab_sz
+            prob_mass_removed = 0.0
 
         # ── Decode strings ──────────────────────────────────────────────────
         selected_str: str = self._tokenizer.decode(  # type: ignore[union-attr]
@@ -361,6 +379,10 @@ class LLMService:
             for i in range(k)
         ]
 
+        masked_pct: float = (
+            round(num_masked_total / vocab_sz * 100, 2) if vocab_sz > 0 else 0.0
+        )
+
         step = DecodingStep(
             step=step_idx + 1,
             context=context,
@@ -374,6 +396,12 @@ class LLMService:
             valid_tokens_after_syncode=valid_tokens_after_syncode,
             entropy_after=round(entropy_after, 4) if entropy_after is not None else None,
             num_masked=num_masked_total,
+            # Masking statistics
+            vocab_size=vocab_sz,
+            valid_token_count=valid_cnt,
+            masked_token_count=num_masked_total,
+            masked_percentage=masked_pct,
+            probability_mass_removed=round(prob_mass_removed, 6),
         )
         return step, selected_id
 

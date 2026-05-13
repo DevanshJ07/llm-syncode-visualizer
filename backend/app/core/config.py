@@ -23,7 +23,7 @@ class Settings(BaseSettings):
     model_name: str = "Qwen/Qwen2.5-Coder-1.5B-Instruct"
     device: str = "cpu"    # "cpu" | "cuda" | "mps"
     max_new_tokens: int = 64
-    default_top_k: int = 10
+    default_top_k: int = 20
 
     # Storage — experiments are stored as JSON files under this directory
     experiments_dir: str = "logs/experiments"

@@ -27,11 +27,20 @@ interface Props {
   onClick?: () => void;
 }
 
+/** Returns a colour for the left border based on how aggressively Syncode masked at this step. */
+function severityBorderColor(pct: number): string {
+  if (pct <= 0) return "transparent";
+  if (pct < 50) return "#3fb950"; // green — light masking
+  if (pct < 85) return "#d29922"; // yellow — moderate masking
+  return "#f85149";               // red — heavy masking
+}
+
 export function TokenStep({ step, isActive, onClick }: Props) {
   const [expanded, setExpanded] = useState(false);
 
-  // The top candidate by probability (used for entropy colour hint)
   const topProb = step.top_tokens[0]?.probability ?? 0;
+  const hasMasking = step.masked_percentage > 0;
+  const severityColor = hasMasking ? severityBorderColor(step.masked_percentage) : "transparent";
 
   return (
     <div
@@ -40,6 +49,7 @@ export function TokenStep({ step, isActive, onClick }: Props) {
           ? "border-accent-blue/60 bg-blue-900/10"
           : "border-surface-border bg-surface-raised hover:border-[#30363d]"
       }`}
+      style={hasMasking ? { borderLeftColor: severityColor, borderLeftWidth: 3 } : undefined}
     >
       {/* ------------------------------------------------------------------ */}
       {/* Collapsed header row                                                 */}
@@ -67,13 +77,23 @@ export function TokenStep({ step, isActive, onClick }: Props) {
           {JSON.stringify(step.selected_token)}
         </Badge>
 
+        {/* Masking percentage (Syncode mode only) */}
+        {hasMasking && (
+          <span
+            className="shrink-0 font-mono text-[10px]"
+            title={`${step.masked_percentage.toFixed(1)}% of vocabulary masked by Syncode`}
+            style={{ color: severityColor }}
+          >
+            {step.masked_percentage.toFixed(0)}%✗
+          </span>
+        )}
+
         {/* Entropy display */}
         {step.entropy_before !== null && (
           <span
             className="shrink-0 font-mono text-[10px]"
             title="Shannon entropy of the full vocabulary distribution"
             style={{
-              // Low entropy → confident (green tint), high entropy → uncertain (yellow tint)
               color: step.entropy_before < 2 ? "#3fb950" : step.entropy_before < 4 ? "#d29922" : "#f85149",
             }}
           >

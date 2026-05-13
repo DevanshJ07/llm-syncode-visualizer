@@ -30,14 +30,24 @@ class TopToken(BaseModel):
 
 class TokenCandidate(BaseModel):
     """
-    Legacy / extended candidate model kept for Syncode phase compatibility.
-    Used when we need to track masking state alongside probability.
+    Extended candidate model used for Syncode before/after distributions.
+    Tracks masking state alongside probability.
     """
     token_id: int
     token_str: str
     probability: float
     is_masked: bool = False    # True when Syncode marked this token grammar-invalid
     is_selected: bool = False  # True for the finally chosen token
+
+
+class MaskedTokenEntry(BaseModel):
+    """
+    A token that was rejected by Syncode grammar masking.
+    Carries its raw (pre-mask) probability for visualisation.
+    """
+    token: str          # decoded string
+    token_id: int       # vocabulary index
+    raw_prob: float     # softmax probability BEFORE Syncode masking
 
 
 class DecodingStep(BaseModel):
@@ -47,14 +57,15 @@ class DecodingStep(BaseModel):
     Core fields (populated by real generation):
         step, context, top_tokens, selected_token, selected_token_id, entropy_before
 
-    Syncode fields (populated in a future phase):
+    Syncode fields (populated when use_syncode=True):
         masked_tokens, valid_tokens_after_syncode, top_tokens_before_syncode,
-        entropy_after, num_masked
+        entropy_after, num_masked, vocab_size, valid_token_count, masked_token_count,
+        masked_percentage, probability_mass_removed
     """
     step: int
     context: str  # decoded text up to (but not including) this step's token
 
-    # --- Real generation fields (Phase 2) ---------------------------------
+    # --- Real generation fields -------------------------------------------
     # Top-k candidates ranked by probability (after temperature scaling)
     top_tokens: list[TopToken] = Field(default_factory=list)
 
@@ -65,13 +76,22 @@ class DecodingStep(BaseModel):
     # Shannon entropy of the full vocabulary probability distribution
     entropy_before: Optional[float] = None
 
-    # --- Syncode fields (Phase 3) -----------------------------------------
-    # These will be populated when Syncode grammar masking is active
+    # --- Syncode fields ---------------------------------------------------
+    # Raw top-k before masking (with is_masked annotation)
     top_tokens_before_syncode: list[TokenCandidate] = Field(default_factory=list)
-    masked_tokens: list[int] = Field(default_factory=list)
+    # Rejected tokens — full objects with raw_prob for visualisation
+    masked_tokens: list[MaskedTokenEntry] = Field(default_factory=list)
+    # Top-k from the constrained (post-mask) distribution
     valid_tokens_after_syncode: list[TokenCandidate] = Field(default_factory=list)
     entropy_after: Optional[float] = None
     num_masked: int = 0
+
+    # --- Syncode masking statistics per step ------------------------------
+    vocab_size: int = 0
+    valid_token_count: int = 0          # tokens that survived grammar masking
+    masked_token_count: int = 0         # = num_masked (alias, kept for API clarity)
+    masked_percentage: float = 0.0      # masked_token_count / vocab_size * 100
+    probability_mass_removed: float = 0.0  # Σ raw_prob of all masked tokens
 
 
 # ---------------------------------------------------------------------------
@@ -103,7 +123,7 @@ class GenerateRequest(BaseModel):
     """POST /generate request body."""
     prompt: str = Field(..., min_length=1, max_length=4096)
     use_syncode: bool = False   # Syncode not yet implemented; always falls back to raw
-    top_k: int = Field(default=10, ge=1, le=200)
+    top_k: int = Field(default=20, ge=1, le=200)
     max_new_tokens: int = Field(default=64, ge=1, le=512)
     temperature: float = Field(default=1.0, ge=0.01, le=2.0)
 

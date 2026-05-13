@@ -47,11 +47,32 @@ export function DecodingTimeline({ steps, loading, onStepSelect }: Props) {
     onStepSelect?.(idx);
   };
 
+  // Check if any step has Syncode masking data
+  const hasMaskingData = steps.some((s) => s.masked_percentage > 0);
+
   return (
     <div className="flex flex-col gap-2">
-      <p className="text-xs text-[#484f58]">
-        {steps.length} decoding step{steps.length !== 1 ? "s" : ""} — click to expand
-      </p>
+      <div className="flex flex-wrap items-center gap-3">
+        <p className="text-xs text-[#484f58]">
+          {steps.length} decoding step{steps.length !== 1 ? "s" : ""} — click to expand
+        </p>
+        {hasMaskingData && (
+          <div className="flex items-center gap-3 text-[10px] text-[#484f58]">
+            <span className="flex items-center gap-1">
+              <span className="inline-block h-3 w-1 rounded-sm bg-[#3fb950]" />
+              &lt;50% masked
+            </span>
+            <span className="flex items-center gap-1">
+              <span className="inline-block h-3 w-1 rounded-sm bg-[#d29922]" />
+              50–85%
+            </span>
+            <span className="flex items-center gap-1">
+              <span className="inline-block h-3 w-1 rounded-sm bg-[#f85149]" />
+              &gt;85%
+            </span>
+          </div>
+        )}
+      </div>
       {steps.map((step, i) => (
         <TokenStep
           key={step.step}
