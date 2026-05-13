@@ -1,22 +1,21 @@
+"use client";
+
 /**
  * useGeneration hook
  *
- * Manages the full lifecycle of a generation request:
- *   1. POST /generate → get experiment_id
- *   2. GET /experiment/{id} → get full result
+ * POST /generate now returns the full decoding trace inline, so there is
+ * no longer a second GET /experiment/{id} round-trip.
  *
- * Used by the PromptForm component to trigger generation and
- * route the user to the experiment viewer on completion.
+ * The hook converts the GenerateResponse into an ExperimentResult shape so
+ * the rest of the UI (experiment page, timeline, charts) stays unchanged.
  */
-
-"use client";
 
 import { useState, useCallback } from "react";
 
-import { postGenerate, getExperiment } from "@/lib/api";
+import { postGenerate } from "@/lib/api";
 import type { ExperimentResult, GenerateRequest } from "@/types/decoding";
 
-type GenerationStatus = "idle" | "generating" | "fetching" | "done" | "error";
+type GenerationStatus = "idle" | "generating" | "done" | "error";
 
 interface UseGenerationReturn {
   status: GenerationStatus;
@@ -37,14 +36,25 @@ export function useGeneration(): UseGenerationReturn {
     setExperiment(null);
 
     try {
-      const { experiment_id } = await postGenerate(request);
+      const response = await postGenerate(request);
 
-      setStatus("fetching");
-      const result = await getExperiment(experiment_id);
+      // Map the inline GenerateResponse onto the ExperimentResult shape
+      // that the experiment viewer page and visualization components expect.
+      const result: ExperimentResult = {
+        experiment_id: response.experiment_id,
+        prompt: response.prompt,
+        mode: response.mode,
+        // generated_text from response maps to generated_code on ExperimentResult
+        generated_code: response.generated_text,
+        steps: response.steps,
+        total_steps: response.total_steps,
+        model_name: response.model_name,
+        created_at: new Date().toISOString(),
+      };
 
       setExperiment(result);
       setStatus("done");
-      return experiment_id;
+      return response.experiment_id;
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);
       setError(message);

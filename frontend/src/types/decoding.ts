@@ -74,10 +74,24 @@ export interface GenerateRequest {
   temperature: number;
 }
 
+/**
+ * POST /generate response — full decoding trace returned inline.
+ * The experiment is also persisted; use experiment_id with GET /experiment/{id}
+ * if you need to retrieve it later.
+ */
 export interface GenerateResponse {
+  // identity
   experiment_id: string;
   status: string;
   message: string;
+  // generated output
+  generated_text: string;
+  model_name: string;
+  mode: string;
+  prompt: string;
+  total_steps: number;
+  // full decoding trace — one entry per generated token
+  steps: DecodingStep[];
 }
 
 export interface StepResponse {

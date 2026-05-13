@@ -109,10 +109,34 @@ class GenerateRequest(BaseModel):
 
 
 class GenerateResponse(BaseModel):
-    """POST /generate response body."""
+    """
+    POST /generate response body.
+
+    Returns the full experiment inline so the frontend can render the
+    visualization immediately without a follow-up GET /experiment/{id}.
+    The experiment is still persisted to disk under logs/experiments/.
+    """
+    # --- Experiment identity ---
     experiment_id: str
-    status: str = "completed"  # "completed" | "error"
+    status: str = "completed"   # "completed" | "error"
     message: str = ""
+
+    # --- Generated output ---
+    generated_text: str = ""    # decoded text of the newly generated tokens
+    model_name: str = ""
+    mode: str = "raw"           # "raw" | "syncode"
+    prompt: str = ""
+    total_steps: int = 0
+
+    # --- Full decoding trace ---
+    # One DecodingStep per generated token.  Each step contains:
+    #   selected_token / selected_token_id  — the greedy-chosen token
+    #   top_tokens                          — top-k candidates with probabilities
+    #   entropy_before                      — Shannon entropy of the full vocab dist
+    #   top_tokens_before_syncode           — placeholder for Phase 3 Syncode data
+    #   masked_tokens / valid_tokens_after_syncode / entropy_after / num_masked
+    #                                       — Syncode mask info (empty until Phase 3)
+    steps: list[DecodingStep] = Field(default_factory=list)
 
 
 class StepResponse(BaseModel):

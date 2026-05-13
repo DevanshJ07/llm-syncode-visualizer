@@ -98,11 +98,7 @@ export function PromptForm() {
       </p>
 
       <Button type="submit" loading={isLoading} size="lg" className="self-start">
-        {isLoading
-          ? status === "generating"
-            ? "Generating…"
-            : "Fetching result…"
-          : "Generate"}
+        {isLoading ? "Generating…" : "Generate"}
       </Button>
     </form>
   );

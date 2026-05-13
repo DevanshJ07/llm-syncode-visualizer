@@ -1,17 +1,3 @@
-"""
-POST /generate
-
-Accepts a prompt + generation settings, runs TinyLlama token-by-token,
-stores the full experiment JSON to disk, and returns the experiment ID.
-
-The CPU-blocking inference runs inside a thread pool executor (inside
-llm_service.generate) so this async route never stalls the event loop.
-
-Model loads lazily on the first request — expect ~20-60 s cold start as
-HuggingFace downloads and initialises TinyLlama.  Subsequent requests are
-fast (model is cached in memory for the lifetime of the process).
-"""
-
 from __future__ import annotations
 
 from fastapi import APIRouter, HTTPException, status
@@ -31,47 +17,53 @@ router = APIRouter()
 )
 async def generate(request: GenerateRequest) -> GenerateResponse:
     """
-    Run greedy autoregressive generation and persist the experiment.
+    Run TinyLlama greedy generation and return the complete decoding trace.
 
-    Body:
-        prompt         – text prompt fed to TinyLlama
-        use_syncode    – ignored for now (Syncode not yet implemented)
-        top_k          – how many top-probability candidates to log per step
-        max_new_tokens – maximum tokens to generate
-        temperature    – softmax temperature (affects logged probabilities;
-                         token selection is always greedy / argmax)
-
-    Returns:
-        experiment_id  – use with GET /experiment/{id} to retrieve results
+    The response contains:
+      - generated_text       : the full decoded output
+      - steps                : one entry per token, each with
+            selected_token / selected_token_id
+            top_tokens        (top-k candidates + probabilities)
+            entropy_before    (Shannon entropy of the full vocab distribution)
+            top_tokens_before_syncode / masked_tokens /
+            valid_tokens_after_syncode / entropy_after / num_masked
+                              (Syncode placeholder fields, empty until Phase 3)
+      - experiment_id        : persisted to disk; retrieve later via
+                               GET /experiment/{id}
     """
-    # Syncode is not implemented yet; all runs are "raw" mode.
-    effective_mode = "raw"
-
-    # Create a new experiment record (written to disk after generation)
     experiment = store.create_empty(
         prompt=request.prompt,
-        mode=effective_mode,
+        mode="raw",
         model_name=settings.model_name,
     )
 
     try:
-        # llm_service.generate() is async — it dispatches the blocking
-        # forward passes to a ThreadPoolExecutor so the event loop stays free.
-        generated_code, steps = await llm_service.generate(
+        generated_text, steps = await llm_service.generate(
             prompt=request.prompt,
             max_new_tokens=request.max_new_tokens,
             top_k=request.top_k,
             temperature=request.temperature,
         )
-        experiment.generated_code = generated_code
-        experiment.steps = steps
-        experiment.total_steps = len(steps)
-        store.save(experiment)
-
     except Exception as exc:
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail=f"Generation failed: {exc}",
         ) from exc
 
-    return GenerateResponse(experiment_id=experiment.experiment_id)
+    experiment.generated_code = generated_text
+    experiment.steps = steps
+    experiment.total_steps = len(steps)
+    store.save(experiment)
+
+    return GenerateResponse(
+        experiment_id=experiment.experiment_id,
+        status="completed",
+        # --- generated output ---
+        generated_text=generated_text,
+        model_name=settings.model_name,
+        mode="raw",
+        prompt=request.prompt,
+        total_steps=len(steps),
+        # --- full decoding trace ---
+        steps=steps,
+    )
