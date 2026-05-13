@@ -24,6 +24,7 @@ frontend/.turbo/
 
 # Logs / experiment data (keep structure, not content)
 logs/experiments/
+backend/logs/
 
 # OS
 .DS_Store
