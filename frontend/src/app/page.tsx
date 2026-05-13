@@ -16,11 +16,12 @@ export default function HomePage() {
       <section className="flex flex-col gap-6">
         <div>
           <h1 className="text-2xl font-bold text-[#e6edf3]">
-            Generate C Code
+            Generate &amp; Visualize
           </h1>
           <p className="mt-1 text-sm text-[#8b949e]">
-            Enter a prompt to generate C code with Llama 3B. Toggle Syncode to
-            apply grammar-constrained decoding and compare token distributions.
+            Enter a prompt. TinyLlama-1.1B generates tokens one-by-one on CPU.
+            Every step is logged — probabilities, entropy, and the greedy
+            selection — so you can inspect the full decoding trace.
           </p>
         </div>
 

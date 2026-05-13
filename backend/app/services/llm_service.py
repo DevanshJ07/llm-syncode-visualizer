@@ -25,9 +25,7 @@ Generation algorithm (per step):
 from __future__ import annotations
 
 import asyncio
-import math
 from concurrent.futures import ThreadPoolExecutor
-from typing import Optional
 
 import torch
 import torch.nn.functional as F
@@ -110,7 +108,8 @@ class LLMService:
         Async wrapper: dispatches the CPU-blocking work to the thread pool
         so the FastAPI event loop stays responsive.
         """
-        loop = asyncio.get_event_loop()
+        # get_running_loop() is the correct call inside an async function
+        loop = asyncio.get_running_loop()
         return await loop.run_in_executor(
             _executor,
             self._run_generate_sync,
@@ -148,8 +147,7 @@ class LLMService:
         # ----------------------------------------------------------------
         # return_tensors="pt" gives us a [1, prompt_len] int64 tensor
         encoded = self._tokenizer(prompt, return_tensors="pt")
-        input_ids: torch.Tensor = encoded["input_ids"]       # [1, prompt_len]
-        prompt_len = input_ids.shape[1]
+        input_ids: torch.Tensor = encoded["input_ids"]  # [1, prompt_len]
 
         steps: list[DecodingStep] = []
         generated_token_ids: list[int] = []

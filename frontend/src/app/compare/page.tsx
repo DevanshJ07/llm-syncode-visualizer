@@ -5,11 +5,15 @@
  *
  * URL: /compare?a={experimentId}&b={experimentId}
  *
- * Allows researchers to load two experiments (raw vs. Syncode) side-by-side.
+ * Allows researchers to load two experiments side-by-side.
  * Pre-populates from URL query params when navigated from the experiment viewer.
+ *
+ * NOTE: useSearchParams() requires a Suspense boundary in Next.js 14 App Router.
+ * The inner CompareContent component does the real work; the default export wraps
+ * it in <Suspense> so the build doesn't throw.
  */
 
-import { useEffect, useState } from "react";
+import { Suspense, useEffect, useState } from "react";
 import { useSearchParams } from "next/navigation";
 
 import { ComparePanel } from "@/components/compare/ComparePanel";
@@ -18,7 +22,11 @@ import { Spinner } from "@/components/ui/Spinner";
 import { getExperiment, listExperiments } from "@/lib/api";
 import type { ExperimentResult } from "@/types/decoding";
 
-export default function ComparePage() {
+// ---------------------------------------------------------------------------
+// Inner component — allowed to call useSearchParams() because it is rendered
+// inside a <Suspense> boundary in the default export below.
+// ---------------------------------------------------------------------------
+function CompareContent() {
   const searchParams = useSearchParams();
 
   const [idA, setIdA] = useState(searchParams.get("a") ?? "");
@@ -37,10 +45,12 @@ export default function ComparePage() {
       .catch(() => {});
   }, []);
 
-  // Auto-load if query params provided
+  // Auto-load experiments that were passed via URL query params
   useEffect(() => {
-    if (idA) loadExperiment(idA, "a");
-    if (idB) loadExperiment(idB, "b");
+    const a = searchParams.get("a");
+    const b = searchParams.get("b");
+    if (a) loadExperiment(a, "a");
+    if (b) loadExperiment(b, "b");
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
@@ -64,11 +74,12 @@ export default function ComparePage() {
       <div>
         <h1 className="text-2xl font-bold text-[#e6edf3]">Compare Experiments</h1>
         <p className="mt-1 text-sm text-[#8b949e]">
-          Load two experiments side-by-side to compare raw vs. Syncode generation.
+          Load two experiments side-by-side to diff generated code and token
+          distributions. Useful for comparing raw vs. Syncode (Phase 3).
         </p>
       </div>
 
-      {/* ID inputs */}
+      {/* Experiment ID selectors */}
       <div className="grid gap-4 sm:grid-cols-2">
         {(["a", "b"] as const).map((slot) => {
           const id = slot === "a" ? idA : idB;
@@ -130,5 +141,22 @@ export default function ComparePage() {
         <ComparePanel raw={expA} syncode={expB} />
       )}
     </div>
+  );
+}
+
+// ---------------------------------------------------------------------------
+// Default export — wraps CompareContent in Suspense so Next.js is satisfied.
+// ---------------------------------------------------------------------------
+export default function ComparePage() {
+  return (
+    <Suspense
+      fallback={
+        <div className="flex justify-center py-32">
+          <Spinner label="Loading…" />
+        </div>
+      }
+    >
+      <CompareContent />
+    </Suspense>
   );
 }
