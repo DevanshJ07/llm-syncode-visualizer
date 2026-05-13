@@ -26,6 +26,10 @@ frontend/.turbo/
 logs/experiments/
 backend/logs/
 
+# Syncode DFA mask store cache (large binary, rebuilt automatically)
+backend/cache/
+cache/
+
 # OS
 .DS_Store
 Thumbs.db

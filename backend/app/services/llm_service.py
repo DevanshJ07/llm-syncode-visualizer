@@ -27,14 +27,22 @@ _executor = ThreadPoolExecutor(max_workers=1)
 
 class _SyncodeConstraint:
     """
-    Thin wrapper around syncode's GrammarLogitsProcessor.
+    Wrapper around syncode 0.4.x SyncodeLogitsProcessor.
 
-    Tries the documented import path; falls back to a no-op if syncode is
-    not installed or the API differs from what we expect.  Callers check
-    `.available` before using `.mask()`.
+    Real API (confirmed against syncode 0.4.16):
+        from syncode import Grammar, SyncodeLogitsProcessor
+        grammar   = Grammar('c')          # Grammar object, not a plain string
+        processor = SyncodeLogitsProcessor(
+                        grammar, tokenizer,
+                        use_cache=True,          # caches DFA mask store to disk
+                        parse_output_only=True,  # skip prompt tokens in parse state
+                        mode='grammar_mask',
+                    )
+        processor.reset()                 # MUST call before every new generation
+        masked = processor(all_input_ids, logits.unsqueeze(0))  # [1, vocab]
 
-    The DFA mask store (compiled grammar automaton) is cached to disk by
-    syncode, so only the first request for a given grammar is slow.
+    The DFA mask store is cached to disk by syncode, so only the first run
+    for a given (grammar, tokenizer) pair is slow (~30 s for C grammar).
     """
 
     def __init__(self, tokenizer: "PreTrainedTokenizerBase", grammar: str = "c") -> None:
@@ -42,39 +50,46 @@ class _SyncodeConstraint:
         self._available = False
 
         try:
-            # syncode >= 0.3.0 canonical import
-            from syncode.logits_processors.grammar_logits_processor import (  # noqa: PLC0415
-                GrammarLogitsProcessor,
-            )
+            from syncode import Grammar, SyncodeLogitsProcessor  # noqa: PLC0415
+
             log.info(
-                "Initializing Syncode grammar processor (grammar=%s). "
-                "First use compiles the DFA automaton — may take ~30 s.",
+                "Initializing Syncode %s-grammar processor "
+                "(first run compiles DFA mask store — may take ~30 s).",
                 grammar,
             )
-            self._processor = GrammarLogitsProcessor(
-                grammar=grammar,
+            gram_obj = Grammar(grammar)
+            self._processor = SyncodeLogitsProcessor(
+                grammar=gram_obj,
                 tokenizer=tokenizer,
+                use_cache=True,
                 parse_output_only=True,
-                num_beams=1,
+                num_samples=1,
+                mode="grammar_mask",
             )
             self._available = True
             log.info("Syncode ready (grammar=%s)", grammar)
+
         except ImportError:
             log.warning(
-                "syncode package not found. "
-                "Install with: pip install syncode  "
-                "(use_syncode requests will fall back to raw mode)"
+                "syncode package not found — install with: pip install syncode. "
+                "use_syncode requests will fall back to raw mode."
             )
         except Exception as exc:
             log.warning(
-                "Syncode initialization failed (%s). "
-                "Falling back to raw generation.",
-                exc,
+                "Syncode initialization failed (%s). Falling back to raw mode.", exc
             )
 
     @property
     def available(self) -> bool:
         return self._available
+
+    def reset(self) -> None:
+        """Reset parse state — MUST be called before each new generation."""
+        if self._processor is not None:
+            try:
+                self._processor.reset()
+            except Exception as exc:
+                log.debug("Syncode reset failed: %s", exc)
 
     def mask(
         self,
@@ -83,20 +98,21 @@ class _SyncodeConstraint:
     ) -> "torch.Tensor | None":
         """
         Returns logits with -inf for grammar-invalid tokens.
-        Returns None on any failure so the caller can fall back to raw mode.
+        Returns None on any failure so the caller falls back to raw mode.
+
+        Calls SyncodeLogitsProcessor.__call__(input_ids [1,T], scores [1,V])
+        which returns [1, vocab_size] with -inf for invalid tokens.
         """
         if not self._available or self._processor is None:
             return None
         try:
-            # HuggingFace LogitsProcessor interface:
-            #   __call__(input_ids [B, T], scores [B, V]) → scores [B, V]
             out: torch.Tensor = self._processor(
                 input_ids=all_input_ids,
-                scores=logits.unsqueeze(0),   # [1, vocab_size]
+                scores=logits.unsqueeze(0),  # [1, vocab_size]
             )
-            return out.squeeze(0)             # [vocab_size]
+            return out.squeeze(0)            # [vocab_size]
         except Exception as exc:
-            log.debug("Syncode masking step failed: %s", exc)
+            log.debug("Syncode mask step failed: %s", exc)
             return None
 
 
@@ -435,6 +451,12 @@ class LLMService:
                 "use_syncode=True but Syncode is unavailable — "
                 "generating in raw mode."
             )
+
+        # Reset Syncode parse state so this generation starts from a clean
+        # grammar state (the processor is reused across requests).
+        if effective_syncode and self._syncode is not None:
+            self._syncode.reset()
+            log.debug("Syncode parse state reset for new generation")
 
         # ── Format prompt with Qwen chat template ──────────────────────────
         if callable(getattr(self._tokenizer, "apply_chat_template", None)):
