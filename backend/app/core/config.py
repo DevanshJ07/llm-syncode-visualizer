@@ -19,9 +19,8 @@ class Settings(BaseSettings):
     cors_origins: list[str] = ["http://localhost:3000"]
 
     # Model
-    # TinyLlama is CPU-compatible and ≈ 2.2 GB RAM in fp32.
-    # Switch to meta-llama/Meta-Llama-3-3B once GPU is available.
-    model_name: str = "TinyLlama/TinyLlama-1.1B-Chat-v1.0"
+    # Qwen2.5-Coder-1.5B-Instruct — CPU-compatible, ≈ 3 GB RAM in fp32.
+    model_name: str = "Qwen/Qwen2.5-Coder-1.5B-Instruct"
     device: str = "cpu"    # "cpu" | "cuda" | "mps"
     max_new_tokens: int = 64
     default_top_k: int = 10

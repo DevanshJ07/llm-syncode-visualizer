@@ -23,7 +23,7 @@ _executor = ThreadPoolExecutor(max_workers=1)
 
 class LLMService:
     """
-    Singleton wrapper around TinyLlama/TinyLlama-1.1B-Chat-v1.0.
+    Singleton wrapper around Qwen/Qwen2.5-Coder-1.5B-Instruct.
 
     Thread-safe lazy loading: the model is downloaded and initialised on the
     first generate() call, then reused for every subsequent request.
@@ -59,13 +59,13 @@ class LLMService:
 
     def load_model(self) -> None:
         """
-        Load AutoTokenizer and AutoModelForCausalLM for TinyLlama.
+        Load AutoTokenizer and AutoModelForCausalLM for Qwen2.5-Coder-Instruct.
 
         Safe to call multiple times — a threading.Lock ensures only one
         thread performs the actual load; all others block until it finishes.
 
         Model is loaded in fp32 on CPU.  low_cpu_mem_usage=True streams
-        weight shards so peak RAM stays near the final footprint (~2.2 GB).
+        weight shards so peak RAM stays near the final footprint (~3 GB).
         """
         # Fast path — already loaded, skip the lock entirely.
         if self._loaded:
@@ -84,6 +84,16 @@ class LLMService:
                 settings.model_name,
                 use_fast=True,          # Rust-backed tokenizer, much faster encode/decode
             )
+
+            # Qwen2.5 has no dedicated pad token; reuse EOS so that any
+            # batching helpers don't raise a ValueError.  Single-sample
+            # inference is unaffected.
+            if self._tokenizer.pad_token_id is None:  # type: ignore[union-attr]
+                self._tokenizer.pad_token_id = (  # type: ignore[union-attr]
+                    self._tokenizer.eos_token_id  # type: ignore[union-attr]
+                    if isinstance(self._tokenizer.eos_token_id, int)  # type: ignore[union-attr]
+                    else self._tokenizer.eos_token_id[0]  # type: ignore[union-attr]
+                )
 
             log.info("Loading model: %s (fp32, CPU)", settings.model_name)
             self._model = AutoModelForCausalLM.from_pretrained(
@@ -241,13 +251,34 @@ class LLMService:
         if not self._loaded:
             self.load_model()
 
-        # Tokenise — add_special_tokens prepends BOS automatically.
+        # Format the prompt with the chat template when available.
+        # Qwen2.5-Coder-Instruct expects the <|im_start|>user … <|im_end|> format;
+        # apply_chat_template produces that wrapper automatically.
+        # Falls back to the raw prompt string for plain base models.
+        if callable(getattr(self._tokenizer, "apply_chat_template", None)):
+            formatted_prompt: str = self._tokenizer.apply_chat_template(  # type: ignore[union-attr]
+                [{"role": "user", "content": prompt}],
+                tokenize=False,
+                add_generation_prompt=True,
+            )
+        else:
+            formatted_prompt = prompt
+
+        # Tokenise — add_special_tokens ensures BOS / chat-header tokens are added.
         encoded = self._tokenizer(  # type: ignore[misc]
-            prompt,
+            formatted_prompt,
             return_tensors="pt",
             add_special_tokens=True,
         )
         input_ids: torch.Tensor = encoded["input_ids"]  # [1, prompt_len]
+
+        # Build the set of EOS token IDs to watch for.
+        # Qwen2.5 tokenizer returns eos_token_id as a list [151645, 151643]
+        # (<|im_end|> and <|endoftext|>); older models return a plain int.
+        raw_eos = self._tokenizer.eos_token_id  # type: ignore[union-attr]
+        eos_ids: set[int] = (
+            set(raw_eos) if isinstance(raw_eos, list) else {raw_eos}
+        )
 
         steps: list[DecodingStep] = []
         generated_ids: list[int] = []
@@ -272,7 +303,7 @@ class LLMService:
             steps.append(step)
             generated_ids.append(selected_id)
 
-            if selected_id == self._tokenizer.eos_token_id:  # type: ignore[union-attr]
+            if selected_id in eos_ids:
                 log.debug("EOS reached at step %d", step_idx + 1)
                 break
 
