@@ -458,9 +458,25 @@ class LLMService:
             self._syncode.reset()
             log.debug("Syncode parse state reset for new generation")
 
-        # ── Format prompt with Qwen chat template ──────────────────────────
-        if callable(getattr(self._tokenizer, "apply_chat_template", None)):
-            formatted_prompt: str = self._tokenizer.apply_chat_template(  # type: ignore[union-attr]
+        # ── Format prompt ───────────────────────────────────────────────────
+        # In Syncode/C-grammar mode we MUST NOT use the chat template.
+        #
+        # The chat template wraps the prompt in <|im_start|>user…<|im_end|>
+        # <|im_start|>assistant\n.  The model then assigns high probability to
+        # conversational preamble tokens ("Sure, here's a function…") that the
+        # C LALR grammar cannot parse.  When the grammar parser fails it falls
+        # back to unconstrained decoding, at which point the model's top-1
+        # token is the chat EOS token <|im_end|> — producing the observed
+        # "c<|im_end|>" output.
+        #
+        # A C-comment completion prompt sidesteps this:
+        #   - The model is anchored to produce C code from token 0
+        #   - The grammar starts from its root state (valid for any C file)
+        #   - No chat control tokens appear in either direction
+        if effective_syncode:
+            formatted_prompt: str = f"// {prompt}\n"
+        elif callable(getattr(self._tokenizer, "apply_chat_template", None)):
+            formatted_prompt = self._tokenizer.apply_chat_template(  # type: ignore[union-attr]
                 [{"role": "user", "content": prompt}],
                 tokenize=False,
                 add_generation_prompt=True,
@@ -494,6 +510,25 @@ class LLMService:
         past_key_values = outputs.past_key_values
         last_logits: torch.Tensor = outputs.logits[0, -1, :]  # [vocab_size]
 
+        # Precompute the set of special/chat token IDs that must never appear
+        # in grammar-constrained output.  This is a belt-and-suspenders guard:
+        # Syncode already pads its accept_mask with False for IDs beyond
+        # tokenizer.vocab_size (which covers the Qwen chat tokens <|im_end|>
+        # etc.), but if the grammar parser falls back to unconstrained decoding
+        # (exception in incremental LALR parse) it would skip the mask entirely.
+        # By explicitly zeroing these IDs we make the suppression unconditional.
+        syncode_suppress_ids: set[int] = set()
+        if effective_syncode:
+            vocab_dim = int(last_logits.size(0))
+            syncode_suppress_ids = {
+                sid for sid in self._tokenizer.all_special_ids  # type: ignore[union-attr]
+                if sid < vocab_dim
+            }
+            log.debug(
+                "Syncode special-token suppression covers %d IDs (vocab_dim=%d)",
+                len(syncode_suppress_ids), vocab_dim,
+            )
+
         log.debug(
             "Starting generation: max_new_tokens=%d top_k=%d T=%.2f syncode=%s",
             max_new_tokens, top_k, temperature, effective_syncode,
@@ -504,8 +539,22 @@ class LLMService:
             masked_logits: torch.Tensor | None = None
             if effective_syncode and self._syncode is not None:
                 masked_logits = self._syncode.mask(all_input_ids, last_logits)
-                # If Syncode masked every token it's a bug — fall back to raw.
-                if masked_logits is not None and (masked_logits == float("-inf")).all():
+
+                # If the grammar processor fell back (returned None), create a
+                # copy of the raw logits so we can still apply the chat-token
+                # suppression below without modifying last_logits in place.
+                if masked_logits is None:
+                    log.debug("Syncode fallback at step %d — applying special-token mask only", step_idx + 1)
+                    masked_logits = last_logits.clone()
+
+                # Unconditionally zero chat/special tokens.  Syncode's own
+                # padding handles these in the normal path, but this makes the
+                # suppression survive any fallback code path.
+                for sid in syncode_suppress_ids:
+                    masked_logits[sid] = float("-inf")
+
+                # If EVERY token ended up masked, fall back to raw gracefully.
+                if (masked_logits == float("-inf")).all():
                     log.warning("Syncode masked all tokens at step %d — using raw", step_idx + 1)
                     masked_logits = None
 
