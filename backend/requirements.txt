@@ -1,0 +1,24 @@
+fastapi==0.111.0
+uvicorn[standard]==0.29.0
+pydantic==2.7.1
+pydantic-settings==2.2.1
+python-dotenv==1.0.1
+httpx==0.27.0
+
+# ML / model inference
+torch==2.2.2
+transformers==4.41.0
+accelerate==0.30.0
+sentencepiece==0.2.0
+
+# Syncode constrained decoding
+# syncode is installed from source; pin the git hash in your dev docs
+# pip install git+https://github.com/uiuc-focal-lab/syncode.git
+
+# Structured logging
+structlog==24.1.0
+
+# Development / testing
+pytest==8.2.0
+pytest-asyncio==0.23.6
+httpx==0.27.0
