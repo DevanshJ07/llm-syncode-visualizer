@@ -53,7 +53,15 @@ export function useGeneration(): UseGenerationReturn {
       };
 
       setExperiment(result);
-      setStatus("done");
+
+      // When the backend signals a partial/error result, surface the message
+      // but still show whatever was generated (status="done" with error toast).
+      if (response.status === "error" && response.message) {
+        setError(`Generation error (partial results shown): ${response.message}`);
+        setStatus("done"); // still "done" so the UI renders the partial results
+      } else {
+        setStatus("done");
+      }
       return response.experiment_id;
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);

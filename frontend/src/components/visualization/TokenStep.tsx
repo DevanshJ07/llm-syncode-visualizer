@@ -88,6 +88,17 @@ export function TokenStep({ step, isActive, onClick }: Props) {
           </span>
         )}
 
+        {/* Parser error / fallback warning badge */}
+        {(step.parser_error || step.fallback_used) && (
+          <span
+            className="shrink-0 rounded px-1 py-0.5 text-[9px] font-semibold"
+            style={{ background: "#d29922", color: "#0d1117" }}
+            title={step.parser_error_message || "Syncode fell back to raw logits at this step"}
+          >
+            ⚠ fallback
+          </span>
+        )}
+
         {/* Entropy display */}
         {step.entropy_before !== null && (
           <span

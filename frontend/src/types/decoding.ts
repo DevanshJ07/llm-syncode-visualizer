@@ -63,6 +63,14 @@ export interface DecodingStep {
   masked_token_count: number;
   masked_percentage: number;
   probability_mass_removed: number;
+
+  // --- Parser recovery metadata ---
+  /** True when the Syncode grammar parser threw at this step. */
+  parser_error: boolean;
+  /** Description of the parser exception (empty string when no error). */
+  parser_error_message: string;
+  /** True when raw logits were used because Syncode masking failed/was unavailable. */
+  fallback_used: boolean;
 }
 
 export interface ExperimentResult {

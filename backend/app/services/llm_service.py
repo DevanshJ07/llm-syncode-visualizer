@@ -95,25 +95,31 @@ class _SyncodeConstraint:
         self,
         all_input_ids: torch.Tensor,  # [1, seq_len] — full context (prompt + generated)
         logits: torch.Tensor,          # [vocab_size]
-    ) -> "torch.Tensor | None":
+    ) -> "tuple[torch.Tensor | None, str | None]":
         """
-        Returns logits with -inf for grammar-invalid tokens.
-        Returns None on any failure so the caller falls back to raw mode.
+        Returns (masked_logits, error_message).
 
-        Calls SyncodeLogitsProcessor.__call__(input_ids [1,T], scores [1,V])
-        which returns [1, vocab_size] with -inf for invalid tokens.
+        masked_logits:
+            torch.Tensor [vocab_size] with -inf for grammar-invalid tokens, or
+            None if Syncode is unavailable / the processor raised an exception.
+        error_message:
+            None on success; a string describing what went wrong otherwise.
+
+        The caller should ALWAYS fall back to raw logits when masked_logits
+        is None — generation must never be aborted due to a parser error.
         """
         if not self._available or self._processor is None:
-            return None
+            return None, None
         try:
             out: torch.Tensor = self._processor(
                 input_ids=all_input_ids,
                 scores=logits.unsqueeze(0),  # [1, vocab_size]
             )
-            return out.squeeze(0)            # [vocab_size]
+            return out.squeeze(0), None      # [vocab_size], no error
         except Exception as exc:
-            log.debug("Syncode mask step failed: %s", exc)
-            return None
+            msg = f"{type(exc).__name__}: {exc}"
+            log.warning("Syncode mask step failed (%s) — falling back to raw logits", msg)
+            return None, msg
 
 
 # ---------------------------------------------------------------------------
@@ -227,6 +233,8 @@ class LLMService:
         top_k: int,
         temperature: float,
         masked_logits: "torch.Tensor | None" = None,  # [vocab_size] or None for raw mode
+        parser_error_msg: "str | None" = None,        # set when grammar parser threw
+        fallback_used: bool = False,                  # True when raw was used as fallback
     ) -> tuple[DecodingStep, int]:
         """
         Compute per-step decoding data from raw (and optionally Syncode-masked) logits.
@@ -402,6 +410,10 @@ class LLMService:
             masked_token_count=num_masked_total,
             masked_percentage=masked_pct,
             probability_mass_removed=round(prob_mass_removed, 6),
+            # Parser recovery metadata
+            parser_error=parser_error_msg is not None,
+            parser_error_message=parser_error_msg or "",
+            fallback_used=fallback_used,
         )
         return step, selected_id
 
@@ -562,57 +574,82 @@ class LLMService:
             max_new_tokens, top_k, temperature, effective_syncode,
         )
 
-        for step_idx in range(max_new_tokens):
-            # ── Optional Syncode mask ───────────────────────────────────────
-            masked_logits: torch.Tensor | None = None
-            if effective_syncode and self._syncode is not None:
-                masked_logits = self._syncode.mask(all_input_ids, last_logits)
+        try:
+            for step_idx in range(max_new_tokens):
+                # ── Optional Syncode mask ───────────────────────────────────
+                masked_logits: torch.Tensor | None = None
+                step_parser_error: str | None = None
+                step_fallback_used: bool = False
 
-                # If the grammar processor fell back (returned None), create a
-                # copy of the raw logits so we can still apply the chat-token
-                # suppression below without modifying last_logits in place.
-                if masked_logits is None:
-                    log.debug("Syncode fallback at step %d — applying special-token mask only", step_idx + 1)
-                    masked_logits = last_logits.clone()
+                if effective_syncode and self._syncode is not None:
+                    masked_logits, step_parser_error = self._syncode.mask(
+                        all_input_ids, last_logits
+                    )
 
-                # Unconditionally zero chat/special tokens.  Syncode's own
-                # padding handles these in the normal path, but this makes the
-                # suppression survive any fallback code path.
-                for sid in syncode_suppress_ids:
-                    masked_logits[sid] = float("-inf")
+                    # Syncode processor returned None (parser exception or
+                    # unavailable): clone raw logits so special-token suppression
+                    # can still be applied without mutating last_logits.
+                    if masked_logits is None:
+                        step_fallback_used = True
+                        masked_logits = last_logits.clone()
 
-                # If EVERY token ended up masked, fall back to raw gracefully.
-                if (masked_logits == float("-inf")).all():
-                    log.warning("Syncode masked all tokens at step %d — using raw", step_idx + 1)
-                    masked_logits = None
+                    # Unconditionally suppress chat/special tokens regardless of
+                    # whether the grammar mask succeeded or fell back.
+                    for sid in syncode_suppress_ids:
+                        masked_logits[sid] = float("-inf")
 
-            step, selected_id = self.generate_step(
-                logits=last_logits,
-                step_idx=step_idx,
-                context_ids=generated_ids,
-                top_k=top_k,
-                temperature=temperature,
-                masked_logits=masked_logits,
+                    # If every token is masked (shouldn't happen), abandon the
+                    # masked distribution and use raw.
+                    if (masked_logits == float("-inf")).all():
+                        log.warning(
+                            "Syncode masked all tokens at step %d — using raw",
+                            step_idx + 1,
+                        )
+                        masked_logits = None
+                        step_fallback_used = True
+
+                step, selected_id = self.generate_step(
+                    logits=last_logits,
+                    step_idx=step_idx,
+                    context_ids=generated_ids,
+                    top_k=top_k,
+                    temperature=temperature,
+                    masked_logits=masked_logits,
+                    parser_error_msg=step_parser_error,
+                    fallback_used=step_fallback_used,
+                )
+                steps.append(step)
+                generated_ids.append(selected_id)
+
+                if selected_id in eos_ids:
+                    log.debug("EOS reached at step %d", step_idx + 1)
+                    break
+
+                # ── Incremental forward pass ────────────────────────────────
+                next_input = torch.tensor([[selected_id]])  # [1, 1]
+                outputs = self._model(  # type: ignore[misc]
+                    input_ids=next_input,
+                    past_key_values=past_key_values,
+                    use_cache=True,
+                )
+                past_key_values = outputs.past_key_values
+                last_logits = outputs.logits[0, -1, :]
+
+                # Extend full sequence for Syncode context tracking.
+                all_input_ids = torch.cat([all_input_ids, next_input], dim=1)
+
+        except Exception as exc:
+            # Any unexpected exception in the generation loop is caught here.
+            # We return whatever tokens were generated before the failure so
+            # the API always returns a valid (possibly partial) response.
+            log.error(
+                "Generation loop failed at step %d/%d: %s — returning %d partial tokens",
+                step_idx + 1 if "step_idx" in dir() else 0,
+                max_new_tokens,
+                exc,
+                len(steps),
+                exc_info=True,
             )
-            steps.append(step)
-            generated_ids.append(selected_id)
-
-            if selected_id in eos_ids:
-                log.debug("EOS reached at step %d", step_idx + 1)
-                break
-
-            # ── Incremental forward pass ────────────────────────────────────
-            next_input = torch.tensor([[selected_id]])  # [1, 1]
-            outputs = self._model(  # type: ignore[misc]
-                input_ids=next_input,
-                past_key_values=past_key_values,
-                use_cache=True,
-            )
-            past_key_values = outputs.past_key_values
-            last_logits = outputs.logits[0, -1, :]
-
-            # Extend full sequence for Syncode context tracking.
-            all_input_ids = torch.cat([all_input_ids, next_input], dim=1)
 
         generated_text: str = self._tokenizer.decode(  # type: ignore[union-attr]
             generated_ids,

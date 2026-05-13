@@ -93,6 +93,16 @@ class DecodingStep(BaseModel):
     masked_percentage: float = 0.0      # masked_token_count / vocab_size * 100
     probability_mass_removed: float = 0.0  # Σ raw_prob of all masked tokens
 
+    # --- Parser recovery metadata -----------------------------------------
+    # True if the Syncode grammar parser threw an exception at this step.
+    # The generation is never aborted — raw/fallback logits are used instead.
+    parser_error: bool = False
+    parser_error_message: str = ""
+    # True when Syncode masking was requested but the raw distribution was
+    # used at this step (either because the processor returned None or because
+    # the grammar parser failed).
+    fallback_used: bool = False
+
 
 # ---------------------------------------------------------------------------
 # Experiment container

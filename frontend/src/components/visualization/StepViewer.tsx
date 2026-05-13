@@ -301,6 +301,22 @@ export function StepViewer({ step }: Props) {
       {/* ── SYNCODE MODE ──────────────────────────────────────────────────── */}
       {isSyncodeMode ? (
         <>
+          {/* Parser error / fallback warning */}
+          {(step.parser_error || step.fallback_used) && (
+            <div className="flex items-start gap-2 rounded-md border border-[#d29922]/30 bg-[#d29922]/10 px-3 py-2 text-xs text-[#d29922]">
+              <span className="mt-0.5 text-sm">⚠</span>
+              <div>
+                <span className="font-semibold">Parser fallback at step {step.step}.</span>
+                {" "}Syncode grammar masking was not applied — raw logits used for token selection.
+                {step.parser_error_message && (
+                  <p className="mt-1 font-mono text-[10px] opacity-80">
+                    {step.parser_error_message}
+                  </p>
+                )}
+              </div>
+            </div>
+          )}
+
           {/* Metrics card */}
           <SyncodeMetricsCard step={step} />
 
