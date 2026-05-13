@@ -6,10 +6,10 @@ python-dotenv==1.0.1
 httpx==0.27.0
 
 # ML / model inference
-torch==2.2.2
+torch>=2.6.0
 transformers==4.41.0
 accelerate==0.30.0
-sentencepiece==0.2.0
+sentencepiece>=0.2.1
 
 # Syncode constrained decoding
 # syncode is installed from source; pin the git hash in your dev docs
