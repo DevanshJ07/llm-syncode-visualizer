@@ -1,16 +1,17 @@
 "use client";
 
 /**
- * TokenStep — summary card for a single decoding step.
+ * TokenStep — collapsible card for one decoding step.
  *
- * Shows:
- *   - step number
- *   - current context (truncated)
- *   - selected token (highlighted)
- *   - number of masked tokens
- *   - entropy before / after Syncode
+ * Collapsed view (always visible):
+ *   [step#]  [context snippet]  [selected token]  [entropy]  [▸/▾]
  *
- * Click to expand: renders TokenProbabilityChart for full candidate list.
+ * Expanded view (click to toggle):
+ *   Full TokenProbabilityChart with all top-k candidates.
+ *   Blue bar = selected token.  Green bars = other candidates.
+ *
+ * A quick-peek "token probability table" is also shown below the chart
+ * so researchers can read exact probabilities without hovering.
  */
 
 import { useState } from "react";
@@ -29,6 +30,9 @@ interface Props {
 export function TokenStep({ step, isActive, onClick }: Props) {
   const [expanded, setExpanded] = useState(false);
 
+  // The top candidate by probability (used for entropy colour hint)
+  const topProb = step.top_tokens[0]?.probability ?? 0;
+
   return (
     <div
       className={`rounded-md border transition-colors ${
@@ -37,52 +41,103 @@ export function TokenStep({ step, isActive, onClick }: Props) {
           : "border-surface-border bg-surface-raised hover:border-[#30363d]"
       }`}
     >
-      {/* Header row */}
+      {/* ------------------------------------------------------------------ */}
+      {/* Collapsed header row                                                 */}
+      {/* ------------------------------------------------------------------ */}
       <button
         type="button"
         onClick={() => {
           onClick?.();
           setExpanded((e) => !e);
         }}
-        className="flex w-full items-center gap-4 px-4 py-3 text-left"
+        className="flex w-full items-center gap-3 px-3 py-2.5 text-left"
       >
-        <span className="w-8 shrink-0 text-center font-mono text-xs text-[#484f58]">
+        {/* Step number */}
+        <span className="w-7 shrink-0 text-center font-mono text-xs text-[#484f58]">
           {step.step}
         </span>
 
-        <span className="flex-1 truncate font-mono text-xs text-[#8b949e]">
-          {truncate(step.context, 60)}
+        {/* Context snippet */}
+        <span className="flex-1 truncate font-mono text-[11px] text-[#8b949e]">
+          {step.context ? truncate(step.context, 55) : <em className="text-[#484f58]">start</em>}
         </span>
 
-        <Badge variant="selected">{JSON.stringify(step.selected_token)}</Badge>
+        {/* Selected token badge */}
+        <Badge variant="selected" className="shrink-0 max-w-[100px] truncate">
+          {JSON.stringify(step.selected_token)}
+        </Badge>
 
-        {step.num_masked > 0 && (
-          <Badge variant="masked">{step.num_masked} masked</Badge>
-        )}
-
+        {/* Entropy display */}
         {step.entropy_before !== null && (
-          <span className="shrink-0 text-xs text-[#484f58]">
+          <span
+            className="shrink-0 font-mono text-[10px]"
+            title="Shannon entropy of the full vocabulary distribution"
+            style={{
+              // Low entropy → confident (green tint), high entropy → uncertain (yellow tint)
+              color: step.entropy_before < 2 ? "#3fb950" : step.entropy_before < 4 ? "#d29922" : "#f85149",
+            }}
+          >
             H={step.entropy_before.toFixed(2)}
-            {step.entropy_after !== null && (
-              <> → {step.entropy_after.toFixed(2)}</>
-            )}
           </span>
         )}
 
-        <span className="text-[#484f58]">{expanded ? "▾" : "▸"}</span>
+        {/* Top probability */}
+        <span className="shrink-0 font-mono text-[10px] text-[#484f58]">
+          p={formatPct(topProb, 1)}
+        </span>
+
+        <span className="text-[#484f58] text-xs">{expanded ? "▾" : "▸"}</span>
       </button>
 
-      {/* Expanded chart */}
+      {/* ------------------------------------------------------------------ */}
+      {/* Expanded body: chart + probability table                             */}
+      {/* ------------------------------------------------------------------ */}
       {expanded && (
-        <div className="border-t border-surface-border px-4 pb-4 pt-3 grid gap-4 sm:grid-cols-2">
+        <div className="border-t border-surface-border px-4 pb-4 pt-3 flex flex-col gap-4">
           <TokenProbabilityChart
-            candidates={step.top_tokens_before_syncode}
-            title="Before Syncode"
+            candidates={step.top_tokens}
+            selectedTokenId={step.selected_token_id}
+            title={`Top ${step.top_tokens.length} candidates — step ${step.step}`}
           />
-          <TokenProbabilityChart
-            candidates={step.valid_tokens_after_syncode}
-            title="After Syncode"
-          />
+
+          {/* Quick-read probability table */}
+          <div className="overflow-x-auto">
+            <table className="w-full border-collapse text-[11px] font-mono">
+              <thead>
+                <tr className="border-b border-surface-border text-left text-[#484f58]">
+                  <th className="pb-1 pr-3 font-medium">rank</th>
+                  <th className="pb-1 pr-3 font-medium">token</th>
+                  <th className="pb-1 pr-3 font-medium">id</th>
+                  <th className="pb-1 font-medium text-right">prob</th>
+                </tr>
+              </thead>
+              <tbody>
+                {step.top_tokens.map((t, rank) => {
+                  const isSelected = t.token_id === step.selected_token_id;
+                  return (
+                    <tr
+                      key={t.token_id}
+                      className={`border-b border-surface-border/40 ${
+                        isSelected ? "text-accent-blue" : "text-[#8b949e]"
+                      }`}
+                    >
+                      <td className="py-0.5 pr-3 text-[#484f58]">{rank + 1}</td>
+                      <td className="py-0.5 pr-3">
+                        {JSON.stringify(t.token)}
+                        {isSelected && (
+                          <span className="ml-1 text-[9px] text-accent-blue">✓</span>
+                        )}
+                      </td>
+                      <td className="py-0.5 pr-3 text-[#484f58]">{t.token_id}</td>
+                      <td className="py-0.5 text-right">
+                        {formatPct(t.probability, 3)}
+                      </td>
+                    </tr>
+                  );
+                })}
+              </tbody>
+            </table>
+          </div>
         </div>
       )}
     </div>

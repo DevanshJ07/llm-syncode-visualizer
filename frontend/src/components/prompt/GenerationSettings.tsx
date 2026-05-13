@@ -70,18 +70,18 @@ export function GenerationSettings({ value, onChange }: Props) {
         label="Max new tokens"
         value={value.max_new_tokens}
         min={16}
-        max={1024}
+        max={512}
         step={16}
         onChange={(v) => set("max_new_tokens", v)}
       />
       <NumberField
         label="Temperature"
         value={value.temperature}
-        min={0}
+        min={0.01}
         max={2}
         step={0.05}
         onChange={(v) => set("temperature", v)}
-        hint="0 = greedy, 1 = normal sampling"
+        hint="Low = sharper dist, high = flatter"
       />
     </div>
   );

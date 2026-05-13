@@ -16,34 +16,60 @@ from pydantic import BaseModel, Field
 # Core decoding data model (matches the JSON logging format in PROJECT_SPEC)
 # ---------------------------------------------------------------------------
 
+class TopToken(BaseModel):
+    """
+    One candidate token at a decoding step — the primary logging unit.
+
+    Matches the JSON format from PROJECT_SPEC:
+        { "token": "main", "probability": 0.42, "token_id": 1234 }
+    """
+    token: str          # human-readable decoded string (may contain whitespace/special chars)
+    probability: float  # softmax probability AFTER temperature scaling, range [0, 1]
+    token_id: int       # vocabulary index
+
+
 class TokenCandidate(BaseModel):
-    """A single candidate token and its probability at one decoding step."""
+    """
+    Legacy / extended candidate model kept for Syncode phase compatibility.
+    Used when we need to track masking state alongside probability.
+    """
     token_id: int
     token_str: str
     probability: float
-    is_masked: bool = False          # True when Syncode marked this token invalid
-    is_selected: bool = False        # True for the finally chosen token
+    is_masked: bool = False    # True when Syncode marked this token grammar-invalid
+    is_selected: bool = False  # True for the finally chosen token
 
 
 class DecodingStep(BaseModel):
-    """Full snapshot of one autoregressive decoding step."""
+    """
+    Full snapshot of one autoregressive decoding step.
+
+    Core fields (populated by real generation):
+        step, context, top_tokens, selected_token, selected_token_id, entropy_before
+
+    Syncode fields (populated in a future phase):
+        masked_tokens, valid_tokens_after_syncode, top_tokens_before_syncode,
+        entropy_after, num_masked
+    """
     step: int
-    context: str                     # Partial generated text up to this step
+    context: str  # decoded text up to (but not including) this step's token
 
-    # Top-k candidates BEFORE Syncode masking is applied
-    top_tokens_before_syncode: list[TokenCandidate] = Field(default_factory=list)
+    # --- Real generation fields (Phase 2) ---------------------------------
+    # Top-k candidates ranked by probability (after temperature scaling)
+    top_tokens: list[TopToken] = Field(default_factory=list)
 
-    # Token IDs that Syncode masked as grammar-invalid
-    masked_tokens: list[int] = Field(default_factory=list)
-
-    # Top-k candidates AFTER Syncode masking (re-normalised probabilities)
-    valid_tokens_after_syncode: list[TokenCandidate] = Field(default_factory=list)
-
-    # The token ultimately selected (greedy / sampling)
+    # The token selected by greedy decoding (argmax of softmax probabilities)
     selected_token: str = ""
+    selected_token_id: int = 0
 
-    # Summary statistics
+    # Shannon entropy of the full vocabulary probability distribution
     entropy_before: Optional[float] = None
+
+    # --- Syncode fields (Phase 3) -----------------------------------------
+    # These will be populated when Syncode grammar masking is active
+    top_tokens_before_syncode: list[TokenCandidate] = Field(default_factory=list)
+    masked_tokens: list[int] = Field(default_factory=list)
+    valid_tokens_after_syncode: list[TokenCandidate] = Field(default_factory=list)
     entropy_after: Optional[float] = None
     num_masked: int = 0
 
@@ -61,12 +87,12 @@ class ExperimentResult(BaseModel):
     """Top-level object stored to disk and returned by GET /experiment/{id}."""
     experiment_id: str
     prompt: str
-    mode: str                        # "raw" | "syncode"
+    mode: str            # "raw" | "syncode"
     generated_code: str = ""
     steps: list[DecodingStep] = Field(default_factory=list)
     total_steps: int = 0
     model_name: str = ""
-    created_at: str = ""             # ISO-8601 timestamp
+    created_at: str = ""  # ISO-8601 timestamp
 
 
 # ---------------------------------------------------------------------------
@@ -76,16 +102,16 @@ class ExperimentResult(BaseModel):
 class GenerateRequest(BaseModel):
     """POST /generate request body."""
     prompt: str = Field(..., min_length=1, max_length=4096)
-    use_syncode: bool = True
-    top_k: int = Field(default=50, ge=1, le=200)
-    max_new_tokens: int = Field(default=256, ge=1, le=1024)
-    temperature: float = Field(default=1.0, ge=0.0, le=2.0)
+    use_syncode: bool = False   # Syncode not yet implemented; always falls back to raw
+    top_k: int = Field(default=10, ge=1, le=200)
+    max_new_tokens: int = Field(default=64, ge=1, le=512)
+    temperature: float = Field(default=1.0, ge=0.01, le=2.0)
 
 
 class GenerateResponse(BaseModel):
     """POST /generate response body."""
     experiment_id: str
-    status: str = "completed"        # "completed" | "error"
+    status: str = "completed"  # "completed" | "error"
     message: str = ""
 
 
