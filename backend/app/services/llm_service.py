@@ -10,16 +10,99 @@ import torch
 import torch.nn.functional as F
 
 from app.core.config import settings
-from app.models.schemas import DecodingStep, TopToken
+from app.models.schemas import DecodingStep, TokenCandidate, TopToken
 
 if TYPE_CHECKING:
     from transformers import PreTrainedModel, PreTrainedTokenizerBase
 
 log = logging.getLogger(__name__)
 
-# Single worker — LlamaForCausalLM is not safe for concurrent forward passes.
+# Single worker — Qwen2ForCausalLM is not safe for concurrent forward passes.
 _executor = ThreadPoolExecutor(max_workers=1)
 
+
+# ---------------------------------------------------------------------------
+# Syncode grammar constraint wrapper
+# ---------------------------------------------------------------------------
+
+class _SyncodeConstraint:
+    """
+    Thin wrapper around syncode's GrammarLogitsProcessor.
+
+    Tries the documented import path; falls back to a no-op if syncode is
+    not installed or the API differs from what we expect.  Callers check
+    `.available` before using `.mask()`.
+
+    The DFA mask store (compiled grammar automaton) is cached to disk by
+    syncode, so only the first request for a given grammar is slow.
+    """
+
+    def __init__(self, tokenizer: "PreTrainedTokenizerBase", grammar: str = "c") -> None:
+        self._processor = None
+        self._available = False
+
+        try:
+            # syncode >= 0.3.0 canonical import
+            from syncode.logits_processors.grammar_logits_processor import (  # noqa: PLC0415
+                GrammarLogitsProcessor,
+            )
+            log.info(
+                "Initializing Syncode grammar processor (grammar=%s). "
+                "First use compiles the DFA automaton — may take ~30 s.",
+                grammar,
+            )
+            self._processor = GrammarLogitsProcessor(
+                grammar=grammar,
+                tokenizer=tokenizer,
+                parse_output_only=True,
+                num_beams=1,
+            )
+            self._available = True
+            log.info("Syncode ready (grammar=%s)", grammar)
+        except ImportError:
+            log.warning(
+                "syncode package not found. "
+                "Install with: pip install syncode  "
+                "(use_syncode requests will fall back to raw mode)"
+            )
+        except Exception as exc:
+            log.warning(
+                "Syncode initialization failed (%s). "
+                "Falling back to raw generation.",
+                exc,
+            )
+
+    @property
+    def available(self) -> bool:
+        return self._available
+
+    def mask(
+        self,
+        all_input_ids: torch.Tensor,  # [1, seq_len] — full context (prompt + generated)
+        logits: torch.Tensor,          # [vocab_size]
+    ) -> "torch.Tensor | None":
+        """
+        Returns logits with -inf for grammar-invalid tokens.
+        Returns None on any failure so the caller can fall back to raw mode.
+        """
+        if not self._available or self._processor is None:
+            return None
+        try:
+            # HuggingFace LogitsProcessor interface:
+            #   __call__(input_ids [B, T], scores [B, V]) → scores [B, V]
+            out: torch.Tensor = self._processor(
+                input_ids=all_input_ids,
+                scores=logits.unsqueeze(0),   # [1, vocab_size]
+            )
+            return out.squeeze(0)             # [vocab_size]
+        except Exception as exc:
+            log.debug("Syncode masking step failed: %s", exc)
+            return None
+
+
+# ---------------------------------------------------------------------------
+# LLMService
+# ---------------------------------------------------------------------------
 
 class LLMService:
     """
@@ -27,14 +110,17 @@ class LLMService:
 
     Thread-safe lazy loading: the model is downloaded and initialised on the
     first generate() call, then reused for every subsequent request.
+
+    When settings.syncode_enabled is True the service also initialises a
+    _SyncodeConstraint (C grammar) that can be activated per-request via
+    the use_syncode flag.
     """
 
     def __init__(self) -> None:
         self._model: "PreTrainedModel | None" = None
         self._tokenizer: "PreTrainedTokenizerBase | None" = None
         self._loaded: bool = False
-        # Re-entrant lock so the same thread can call load_model() twice
-        # (e.g. from _run_generate_sync which itself runs in the executor).
+        self._syncode: "_SyncodeConstraint | None" = None
         self._lock: threading.Lock = threading.Lock()
 
     # ------------------------------------------------------------------
@@ -66,14 +152,14 @@ class LLMService:
 
         Model is loaded in fp32 on CPU.  low_cpu_mem_usage=True streams
         weight shards so peak RAM stays near the final footprint (~3 GB).
+
+        If settings.syncode_enabled is True the Syncode C-grammar processor
+        is also initialised here (once, cached globally).
         """
-        # Fast path — already loaded, skip the lock entirely.
         if self._loaded:
             return
 
         with self._lock:
-            # Second check inside the lock — another thread may have loaded
-            # the model while this thread was waiting to acquire the lock.
             if self._loaded:
                 return
 
@@ -82,29 +168,35 @@ class LLMService:
             log.info("Loading tokenizer: %s", settings.model_name)
             self._tokenizer = AutoTokenizer.from_pretrained(
                 settings.model_name,
-                use_fast=True,          # Rust-backed tokenizer, much faster encode/decode
+                use_fast=True,
             )
 
-            # Qwen2.5 has no dedicated pad token; reuse EOS so that any
-            # batching helpers don't raise a ValueError.  Single-sample
-            # inference is unaffected.
+            # Qwen2.5 has no dedicated pad token; reuse EOS to satisfy any
+            # batching helpers that require pad_token_id to be set.
             if self._tokenizer.pad_token_id is None:  # type: ignore[union-attr]
+                raw_eos = self._tokenizer.eos_token_id  # type: ignore[union-attr]
                 self._tokenizer.pad_token_id = (  # type: ignore[union-attr]
-                    self._tokenizer.eos_token_id  # type: ignore[union-attr]
-                    if isinstance(self._tokenizer.eos_token_id, int)  # type: ignore[union-attr]
-                    else self._tokenizer.eos_token_id[0]  # type: ignore[union-attr]
+                    raw_eos if isinstance(raw_eos, int) else raw_eos[0]
                 )
 
             log.info("Loading model: %s (fp32, CPU)", settings.model_name)
             self._model = AutoModelForCausalLM.from_pretrained(
                 settings.model_name,
-                torch_dtype=torch.float32,   # fp32 for x86 CPU compatibility
-                low_cpu_mem_usage=True,      # stream shards, avoid 2× RAM spike
+                torch_dtype=torch.float32,
+                low_cpu_mem_usage=True,
             )
-            self._model.eval()  # disable dropout; not needed for inference
+            self._model.eval()
 
             n_params = sum(p.numel() for p in self._model.parameters())
             log.info("Model ready — %.0fM parameters", n_params / 1e6)
+
+            # Optionally initialise Syncode grammar constraint.
+            if settings.syncode_enabled:
+                self._syncode = _SyncodeConstraint(self._tokenizer)
+            else:
+                log.info("Syncode disabled (SYNCODE_ENABLED=false). "
+                         "Set to true and restart to enable grammar masking.")
+
             self._loaded = True
 
     # ------------------------------------------------------------------
@@ -113,74 +205,145 @@ class LLMService:
 
     def generate_step(
         self,
-        logits: torch.Tensor,   # [vocab_size]  raw logits for the current position
-        step_idx: int,          # 0-based; stored as step_idx+1 in the log
-        context_ids: list[int], # token IDs generated so far → decoded to context string
+        logits: torch.Tensor,           # [vocab_size] raw logits for the current position
+        step_idx: int,                  # 0-based; stored as step_idx+1 in the log
+        context_ids: list[int],         # generated IDs so far → decoded to context string
         top_k: int,
         temperature: float,
+        masked_logits: "torch.Tensor | None" = None,  # [vocab_size] or None for raw mode
     ) -> tuple[DecodingStep, int]:
         """
-        Compute probabilities, entropy, top-k candidates, and greedy selection
-        from a single set of raw logits.
+        Compute per-step decoding data from raw (and optionally Syncode-masked) logits.
 
-        Decoupled from the generation loop so Phase 3 (Syncode) can mask
-        logits before calling this without touching any probability math.
+        Raw mode  (masked_logits is None):
+            probs = softmax(logits / T)
+            selected = argmax(probs)
+            top_tokens filled; Syncode fields empty.
 
-        Returns
-        -------
-        step        : DecodingStep populated and ready for JSON logging
-        selected_id : vocabulary index of the greedy-chosen token
+        Syncode mode  (masked_logits provided):
+            probs_raw    = softmax(logits / T)         → entropy_before, top_tokens_before_syncode
+            probs_masked = softmax(masked_logits / T)  → entropy_after, valid_tokens_after_syncode
+            selected     = argmax(probs_masked)         (from constrained distribution)
+            masked_tokens = top-k IDs that were -inf in masked_logits
+
+        generate_step is intentionally decoupled from the generation loop so
+        that Phase 3 Syncode can inject the masked_logits without touching
+        any probability maths.
         """
-        # Temperature scaling — divide before softmax so the distribution
-        # sharpens (T<1) or flattens (T>1) before probabilities are computed.
-        scaled: torch.Tensor = logits / temperature  # [vocab_size]
+        # ── RAW distribution (always computed) ─────────────────────────────
+        scaled_raw: torch.Tensor = logits / temperature
+        probs_raw: torch.Tensor = F.softmax(scaled_raw, dim=-1)
 
-        # Softmax → proper probability distribution over the full vocabulary.
-        probs: torch.Tensor = F.softmax(scaled, dim=-1)  # [vocab_size]
-
-        # Shannon entropy H = -Σ p·log(p).
-        # Clamp before log to avoid -inf at p=0.
-        # High H → uncertain (flat distribution). Low H → confident (peaked).
-        entropy: float = float(
-            -(probs * torch.log(probs.clamp(min=1e-12))).sum()
+        entropy_before: float = float(
+            -(probs_raw * torch.log(probs_raw.clamp(min=1e-12))).sum()
         )
 
-        # top-k extraction — torch.topk returns values and indices sorted
-        # in descending order.
-        k = min(top_k, probs.size(0))
-        topk_probs, topk_ids = torch.topk(probs, k=k)
+        k = min(top_k, probs_raw.size(0))
+        topk_raw_probs, topk_raw_ids = torch.topk(probs_raw, k=k)
 
-        # Decode each candidate token ID to a human-readable string.
-        # skip_special_tokens=False keeps <eos> visible in the table.
-        # clean_up_tokenization_spaces=False preserves leading spaces
-        # that are semantically part of the token (e.g. " int" ≠ "int").
-        top_tokens: list[TopToken] = [
-            TopToken(
-                token=self._tokenizer.decode(  # type: ignore[union-attr]
-                    [int(topk_ids[i])],
-                    skip_special_tokens=False,
-                    clean_up_tokenization_spaces=False,
-                ),
-                probability=float(topk_probs[i]),
-                token_id=int(topk_ids[i]),
+        # ── Resolve masked distribution ─────────────────────────────────────
+        use_syncode = masked_logits is not None
+
+        if use_syncode:
+            # Safety: if syncode masked every token fall back to raw selection.
+            if (masked_logits == float("-inf")).all():  # type: ignore[operator]
+                log.warning("Syncode masked ALL tokens at step %d — using raw selection", step_idx + 1)
+                use_syncode = False
+                masked_logits = None
+
+        if use_syncode and masked_logits is not None:
+            scaled_masked = masked_logits / temperature
+            probs_masked: torch.Tensor = F.softmax(scaled_masked, dim=-1)
+
+            entropy_after: float | None = float(
+                -(probs_masked * torch.log(probs_masked.clamp(min=1e-12))).sum()
             )
-            for i in range(k)
-        ]
 
-        # Greedy selection — argmax over the FULL vocabulary, not just top-k.
-        selected_id: int = int(torch.argmax(probs))
+            # Greedy selection from the CONSTRAINED distribution.
+            selected_id: int = int(torch.argmax(probs_masked))
+
+            # A token is "masked" if it was valid in raw logits but set to -inf
+            # by Syncode.  We report only those appearing in the raw top-k so
+            # the frontend payload stays small.
+            masked_flag: torch.Tensor = (
+                (masked_logits == float("-inf")) & (logits > float("-inf"))
+            )
+            masked_in_topk: list[int] = [
+                int(topk_raw_ids[i])
+                for i in range(k)
+                if masked_flag[int(topk_raw_ids[i])]
+            ]
+            num_masked_total: int = int(masked_flag.sum())
+
+            # top_tokens_before_syncode — raw top-k with is_masked annotation
+            top_tokens_before_syncode: list[TokenCandidate] = [
+                TokenCandidate(
+                    token_id=int(topk_raw_ids[i]),
+                    token_str=self._tokenizer.decode(  # type: ignore[union-attr]
+                        [int(topk_raw_ids[i])],
+                        skip_special_tokens=False,
+                        clean_up_tokenization_spaces=False,
+                    ),
+                    probability=float(topk_raw_probs[i]),
+                    is_masked=bool(masked_flag[int(topk_raw_ids[i])]),
+                    is_selected=int(topk_raw_ids[i]) == selected_id,
+                )
+                for i in range(k)
+            ]
+
+            # valid_tokens_after_syncode — top-k from the constrained distribution
+            topk_masked_probs, topk_masked_ids = torch.topk(probs_masked, k=k)
+            valid_tokens_after_syncode: list[TokenCandidate] = [
+                TokenCandidate(
+                    token_id=int(topk_masked_ids[i]),
+                    token_str=self._tokenizer.decode(  # type: ignore[union-attr]
+                        [int(topk_masked_ids[i])],
+                        skip_special_tokens=False,
+                        clean_up_tokenization_spaces=False,
+                    ),
+                    probability=float(topk_masked_probs[i]),
+                    is_masked=False,  # by definition — these survived masking
+                    is_selected=int(topk_masked_ids[i]) == selected_id,
+                )
+                for i in range(k)
+                if float(topk_masked_probs[i]) > 1e-12  # skip effectively zero tokens
+            ]
+
+        else:
+            # Raw mode — greedy from the unmasked distribution
+            selected_id = int(torch.argmax(probs_raw))
+            entropy_after = None
+            top_tokens_before_syncode = []
+            valid_tokens_after_syncode = []
+            masked_in_topk = []
+            num_masked_total = 0
+
+        # ── Decode strings ──────────────────────────────────────────────────
         selected_str: str = self._tokenizer.decode(  # type: ignore[union-attr]
             [selected_id],
             skip_special_tokens=False,
             clean_up_tokenization_spaces=False,
         )
 
-        # Decode the context produced so far (everything before this step).
         context: str = self._tokenizer.decode(  # type: ignore[union-attr]
             context_ids,
             skip_special_tokens=True,
             clean_up_tokenization_spaces=True,
         )
+
+        # top_tokens — raw top-k always present (used by raw-mode charts)
+        top_tokens: list[TopToken] = [
+            TopToken(
+                token=self._tokenizer.decode(  # type: ignore[union-attr]
+                    [int(topk_raw_ids[i])],
+                    skip_special_tokens=False,
+                    clean_up_tokenization_spaces=False,
+                ),
+                probability=float(topk_raw_probs[i]),
+                token_id=int(topk_raw_ids[i]),
+            )
+            for i in range(k)
+        ]
 
         step = DecodingStep(
             step=step_idx + 1,
@@ -188,7 +351,13 @@ class LLMService:
             top_tokens=top_tokens,
             selected_token=selected_str,
             selected_token_id=selected_id,
-            entropy_before=round(entropy, 4),
+            entropy_before=round(entropy_before, 4),
+            # Syncode fields — empty in raw mode, populated in Syncode mode
+            top_tokens_before_syncode=top_tokens_before_syncode,
+            masked_tokens=masked_in_topk,
+            valid_tokens_after_syncode=valid_tokens_after_syncode,
+            entropy_after=round(entropy_after, 4) if entropy_after is not None else None,
+            num_masked=num_masked_total,
         )
         return step, selected_id
 
@@ -202,6 +371,7 @@ class LLMService:
         max_new_tokens: int,
         top_k: int,
         temperature: float,
+        use_syncode: bool = False,
     ) -> tuple[str, list[DecodingStep]]:
         """
         Async entry point for FastAPI route handlers.
@@ -217,6 +387,7 @@ class LLMService:
             max_new_tokens,
             top_k,
             temperature,
+            use_syncode,
         )
 
     # ------------------------------------------------------------------
@@ -230,6 +401,7 @@ class LLMService:
         max_new_tokens: int,
         top_k: int,
         temperature: float,
+        use_syncode: bool = False,
     ) -> tuple[str, list[DecodingStep]]:
         """
         Token-by-token greedy generation.  Synchronous / blocking — always
@@ -237,24 +409,34 @@ class LLMService:
 
         Steps
         -----
-        1. Lazy-load model if needed.
-        2. Tokenise prompt → input_ids [1, prompt_len].
-        3. Full forward pass over the prompt to prime the KV cache.
-           past_key_values lets every subsequent step run in O(1) attention
-           instead of re-processing the full context.
-        4. Loop up to max_new_tokens:
-             a. Call generate_step() → DecodingStep + selected_id.
-             b. Break on EOS.
-             c. Forward pass with the single new token + cached KV state.
-        5. Decode and return generated text + step list.
+        1. Lazy-load model (and Syncode if enabled) if needed.
+        2. Apply Qwen chat template to the prompt.
+        3. Tokenise → input_ids [1, prompt_len].
+        4. Full forward pass over the prompt to prime the KV cache.
+        5. Loop up to max_new_tokens:
+             a. If use_syncode: get grammar mask from _SyncodeConstraint.
+             b. Call generate_step() with optional masked_logits.
+             c. Break on EOS.
+             d. Incremental forward pass with new token + cached KV state.
+             e. Update all_input_ids (for Syncode context tracking).
+        6. Decode and return generated text + step list.
         """
         if not self._loaded:
             self.load_model()
 
-        # Format the prompt with the chat template when available.
-        # Qwen2.5-Coder-Instruct expects the <|im_start|>user … <|im_end|> format;
-        # apply_chat_template produces that wrapper automatically.
-        # Falls back to the raw prompt string for plain base models.
+        # Determine if Syncode is actually usable for this request.
+        effective_syncode = (
+            use_syncode
+            and self._syncode is not None
+            and self._syncode.available
+        )
+        if use_syncode and not effective_syncode:
+            log.warning(
+                "use_syncode=True but Syncode is unavailable — "
+                "generating in raw mode."
+            )
+
+        # ── Format prompt with Qwen chat template ──────────────────────────
         if callable(getattr(self._tokenizer, "apply_chat_template", None)):
             formatted_prompt: str = self._tokenizer.apply_chat_template(  # type: ignore[union-attr]
                 [{"role": "user", "content": prompt}],
@@ -264,7 +446,6 @@ class LLMService:
         else:
             formatted_prompt = prompt
 
-        # Tokenise — add_special_tokens ensures BOS / chat-header tokens are added.
         encoded = self._tokenizer(  # type: ignore[misc]
             formatted_prompt,
             return_tensors="pt",
@@ -272,9 +453,12 @@ class LLMService:
         )
         input_ids: torch.Tensor = encoded["input_ids"]  # [1, prompt_len]
 
-        # Build the set of EOS token IDs to watch for.
-        # Qwen2.5 tokenizer returns eos_token_id as a list [151645, 151643]
-        # (<|im_end|> and <|endoftext|>); older models return a plain int.
+        # Track the full sequence (prompt + generated) for Syncode context.
+        # The model uses past_key_values so only needs the new token each step,
+        # but Syncode's LogitsProcessor needs the full sequence to parse state.
+        all_input_ids: torch.Tensor = input_ids
+
+        # Build EOS set — Qwen2.5 returns a list [151645, 151643].
         raw_eos = self._tokenizer.eos_token_id  # type: ignore[union-attr]
         eos_ids: set[int] = (
             set(raw_eos) if isinstance(raw_eos, list) else {raw_eos}
@@ -283,22 +467,33 @@ class LLMService:
         steps: list[DecodingStep] = []
         generated_ids: list[int] = []
 
-        # Prime KV cache — one forward pass over the entire prompt.
+        # ── Prime KV cache ─────────────────────────────────────────────────
         outputs = self._model(input_ids=input_ids, use_cache=True)  # type: ignore[misc]
         past_key_values = outputs.past_key_values
-        # logits: [1, prompt_len, vocab_size] → slice last position → [vocab_size]
-        last_logits: torch.Tensor = outputs.logits[0, -1, :]
+        last_logits: torch.Tensor = outputs.logits[0, -1, :]  # [vocab_size]
 
-        log.debug("Starting generation: max_new_tokens=%d top_k=%d T=%.2f",
-                  max_new_tokens, top_k, temperature)
+        log.debug(
+            "Starting generation: max_new_tokens=%d top_k=%d T=%.2f syncode=%s",
+            max_new_tokens, top_k, temperature, effective_syncode,
+        )
 
         for step_idx in range(max_new_tokens):
+            # ── Optional Syncode mask ───────────────────────────────────────
+            masked_logits: torch.Tensor | None = None
+            if effective_syncode and self._syncode is not None:
+                masked_logits = self._syncode.mask(all_input_ids, last_logits)
+                # If Syncode masked every token it's a bug — fall back to raw.
+                if masked_logits is not None and (masked_logits == float("-inf")).all():
+                    log.warning("Syncode masked all tokens at step %d — using raw", step_idx + 1)
+                    masked_logits = None
+
             step, selected_id = self.generate_step(
                 logits=last_logits,
                 step_idx=step_idx,
                 context_ids=generated_ids,
                 top_k=top_k,
                 temperature=temperature,
+                masked_logits=masked_logits,
             )
             steps.append(step)
             generated_ids.append(selected_id)
@@ -307,7 +502,7 @@ class LLMService:
                 log.debug("EOS reached at step %d", step_idx + 1)
                 break
 
-            # Incremental forward pass — one token [1,1] + cached KV tensors.
+            # ── Incremental forward pass ────────────────────────────────────
             next_input = torch.tensor([[selected_id]])  # [1, 1]
             outputs = self._model(  # type: ignore[misc]
                 input_ids=next_input,
@@ -315,7 +510,10 @@ class LLMService:
                 use_cache=True,
             )
             past_key_values = outputs.past_key_values
-            last_logits = outputs.logits[0, -1, :]  # [vocab_size]
+            last_logits = outputs.logits[0, -1, :]
+
+            # Extend full sequence for Syncode context tracking.
+            all_input_ids = torch.cat([all_input_ids, next_input], dim=1)
 
         generated_text: str = self._tokenizer.decode(  # type: ignore[union-attr]
             generated_ids,

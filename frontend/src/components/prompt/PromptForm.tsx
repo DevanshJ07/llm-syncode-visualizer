@@ -4,7 +4,12 @@
  * PromptForm — controlled input component.
  *
  * All generation state lives in the parent (page.tsx) via useGeneration.
- * This component only owns the prompt text and settings UI state.
+ * This component only owns the prompt text, settings, and Syncode toggle.
+ *
+ * The Syncode toggle is now functional.  When enabled, POST /generate
+ * will apply C-grammar masking at each decoding step and populate the
+ * top_tokens_before_syncode / masked_tokens / valid_tokens_after_syncode
+ * fields in the response.
  */
 
 import { useState } from "react";
@@ -22,6 +27,7 @@ const DEFAULT_PROMPT = `Write a C function that reverses a null-terminated strin
 
 export function PromptForm({ onSubmit, isLoading, error }: Props) {
   const [prompt, setPrompt] = useState(DEFAULT_PROMPT);
+  const [useSyncode, setUseSyncode] = useState(false);
   const [showSettings, setShowSettings] = useState(false);
   const [settings, setSettings] = useState<Omit<GenerateRequest, "prompt" | "use_syncode">>({
     top_k: 10,
@@ -31,7 +37,7 @@ export function PromptForm({ onSubmit, isLoading, error }: Props) {
 
   const handleSubmit = (e: React.FormEvent) => {
     e.preventDefault();
-    onSubmit({ prompt, use_syncode: false, ...settings });
+    onSubmit({ prompt, use_syncode: useSyncode, ...settings });
   };
 
   return (
@@ -55,17 +61,37 @@ export function PromptForm({ onSubmit, isLoading, error }: Props) {
         />
       </div>
 
-      {/* Syncode — disabled until Phase 3 */}
-      <div className="flex items-center gap-3 rounded-md border border-surface-border/40 bg-surface px-3 py-2 opacity-40">
-        <div className="relative shrink-0">
-          <div className="h-5 w-9 rounded-full bg-surface-border" />
-          <div className="absolute top-0.5 left-0.5 h-4 w-4 rounded-full bg-[#484f58] shadow" />
+      {/* Syncode toggle — now functional */}
+      <label className="flex cursor-pointer items-center gap-3 rounded-md border border-surface-border bg-surface px-3 py-2 transition-colors hover:border-[#30363d]">
+        {/* Custom toggle track */}
+        <div className="relative shrink-0" onClick={() => !isLoading && setUseSyncode((v) => !v)}>
+          <div
+            className={`h-5 w-9 rounded-full transition-colors ${
+              useSyncode ? "bg-accent-blue" : "bg-surface-border"
+            }`}
+          />
+          <div
+            className={`absolute top-0.5 h-4 w-4 rounded-full bg-white shadow transition-transform ${
+              useSyncode ? "translate-x-4" : "translate-x-0.5"
+            }`}
+          />
         </div>
-        <span className="text-sm text-[#8b949e]">Syncode constrained decoding</span>
-        <span className="ml-auto rounded border border-surface-border px-1.5 py-0.5 text-[10px] text-[#484f58]">
-          Phase 3
-        </span>
-      </div>
+        <div className="flex flex-col gap-0.5">
+          <span className={`text-sm ${useSyncode ? "text-accent-blue" : "text-[#8b949e]"}`}>
+            Syncode constrained decoding
+          </span>
+          <span className="text-[10px] text-[#484f58]">
+            {useSyncode
+              ? "Grammar masking active — invalid C tokens will be suppressed"
+              : "Off — raw greedy decoding, no grammar constraint"}
+          </span>
+        </div>
+        {useSyncode && (
+          <span className="ml-auto rounded border border-accent-blue/40 bg-accent-blue/10 px-1.5 py-0.5 text-[10px] text-accent-blue">
+            C grammar
+          </span>
+        )}
+      </label>
 
       {/* Advanced settings */}
       <button
@@ -88,7 +114,9 @@ export function PromptForm({ onSubmit, isLoading, error }: Props) {
       )}
 
       <p className="text-[11px] text-[#484f58]">
-        TinyLlama-1.1B · CPU · ~30–90 s on first run (model downloads once)
+        Qwen2.5-Coder-1.5B · CPU
+        {useSyncode && " · Syncode C grammar (DFA builds on first run ~30 s)"}
+        {!useSyncode && " · ~30–90 s on first run (model downloads once)"}
       </p>
 
       <Button type="submit" loading={isLoading} size="lg" className="self-start">

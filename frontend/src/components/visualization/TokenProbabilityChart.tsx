@@ -7,14 +7,15 @@
  *
  * Colour coding:
  *   blue  (#58a6ff) — the selected token (greedy argmax)
- *   green (#3fb950) — all other candidates
+ *   red   (#f85149) — a token masked by Syncode (grammar-invalid)
+ *   green (#3fb950) — all other (unmasked, unselected) candidates
  *
- * The selected token is identified by matching token_id === selectedTokenId.
- * If selectedTokenId is not in the top-k list (can happen when greedy pick
- * falls outside the logged top-k), we fall back to matching by string.
- *
- * Uses Recharts BarChart in a horizontal layout (token labels on Y-axis,
- * probability on X-axis).  The full probability is shown in the tooltip.
+ * Props
+ * -----
+ * candidates      TopToken[]     — sorted by probability before passing in
+ * selectedTokenId number         — highlights the greedy-chosen bar in blue
+ * maskedIds       number[]       — IDs to colour red (Syncode masked tokens)
+ * title           string         — optional chart heading
  */
 
 import {
@@ -31,17 +32,33 @@ import { formatPct } from "@/lib/utils";
 
 interface Props {
   candidates: TopToken[];
-  /** Vocabulary index of the selected (greedy) token — used to colour the bar. */
   selectedTokenId?: number;
+  /** Token IDs that were masked by Syncode — rendered in red. */
+  maskedIds?: number[];
   title?: string;
 }
 
 /** Escape non-printable chars so Recharts YAxis labels render safely. */
 function safeLabel(token: string): string {
-  return JSON.stringify(token); // wraps in quotes and escapes \n, \t, etc.
+  return JSON.stringify(token);
 }
 
-export function TokenProbabilityChart({ candidates, selectedTokenId, title }: Props) {
+function barColor(
+  tokenId: number,
+  selectedTokenId: number | undefined,
+  maskedSet: Set<number>,
+): string {
+  if (tokenId === selectedTokenId) return "#58a6ff"; // blue — selected
+  if (maskedSet.has(tokenId))      return "#f85149"; // red  — masked by Syncode
+  return "#3fb950";                                   // green — valid candidate
+}
+
+export function TokenProbabilityChart({
+  candidates,
+  selectedTokenId,
+  maskedIds,
+  title,
+}: Props) {
   if (candidates.length === 0) {
     return (
       <div className="flex h-40 items-center justify-center text-sm text-[#484f58]">
@@ -50,7 +67,9 @@ export function TokenProbabilityChart({ candidates, selectedTokenId, title }: Pr
     );
   }
 
-  // Sort descending by probability, cap at 20 bars for readability
+  const maskedSet = new Set<number>(maskedIds ?? []);
+  const hasMasked = maskedSet.size > 0;
+
   const data = [...candidates]
     .sort((a, b) => b.probability - a.probability)
     .slice(0, 20)
@@ -58,6 +77,7 @@ export function TokenProbabilityChart({ candidates, selectedTokenId, title }: Pr
       ...t,
       label: safeLabel(t.token),
       pct: t.probability,
+      isMasked: maskedSet.has(t.token_id),
       isSelected: t.token_id === selectedTokenId,
     }));
 
@@ -78,7 +98,6 @@ export function TokenProbabilityChart({ candidates, selectedTokenId, title }: Pr
           layout="vertical"
           margin={{ top: 0, right: 40, bottom: 0, left: 4 }}
         >
-          {/* X-axis: probability 0–1 */}
           <XAxis
             type="number"
             domain={[0, Math.max(...data.map((d) => d.pct)) * 1.1]}
@@ -87,8 +106,6 @@ export function TokenProbabilityChart({ candidates, selectedTokenId, title }: Pr
             axisLine={false}
             tickLine={false}
           />
-
-          {/* Y-axis: token label */}
           <YAxis
             type="category"
             dataKey="label"
@@ -97,7 +114,6 @@ export function TokenProbabilityChart({ candidates, selectedTokenId, title }: Pr
             axisLine={false}
             tickLine={false}
           />
-
           <Tooltip
             cursor={{ fill: "rgba(255,255,255,0.03)" }}
             contentStyle={{
@@ -107,18 +123,21 @@ export function TokenProbabilityChart({ candidates, selectedTokenId, title }: Pr
               fontSize: 12,
               color: "#e6edf3",
             }}
-            formatter={(value: number, _name: string, props: { payload?: { token: string } }) => [
-              formatPct(value, 3),
+            formatter={(
+              value: number,
+              _name: string,
+              props: { payload?: { token: string; isMasked?: boolean } },
+            ) => [
+              `${formatPct(value, 3)}${props.payload?.isMasked ? "  ✗ masked" : ""}`,
               props.payload?.token ?? "probability",
             ]}
           />
-
           <Bar dataKey="pct" radius={[0, 3, 3, 0]} maxBarSize={16}>
             {data.map((entry, i) => (
               <Cell
                 key={i}
-                fill={entry.isSelected ? "#58a6ff" : "#3fb950"}
-                opacity={entry.isSelected ? 1 : 0.7}
+                fill={barColor(entry.token_id, selectedTokenId, maskedSet)}
+                opacity={entry.isMasked ? 0.45 : entry.isSelected ? 1 : 0.75}
               />
             ))}
           </Bar>
@@ -126,15 +145,21 @@ export function TokenProbabilityChart({ candidates, selectedTokenId, title }: Pr
       </ResponsiveContainer>
 
       {/* Legend */}
-      <div className="flex gap-4 text-[10px] text-[#484f58]">
+      <div className="flex flex-wrap gap-4 text-[10px] text-[#484f58]">
         <span className="flex items-center gap-1">
           <span className="inline-block h-2 w-2 rounded-sm bg-[#58a6ff]" />
-          selected (greedy)
+          selected
         </span>
         <span className="flex items-center gap-1">
-          <span className="inline-block h-2 w-2 rounded-sm bg-[#3fb950] opacity-70" />
-          candidate
+          <span className="inline-block h-2 w-2 rounded-sm bg-[#3fb950] opacity-75" />
+          valid candidate
         </span>
+        {hasMasked && (
+          <span className="flex items-center gap-1">
+            <span className="inline-block h-2 w-2 rounded-sm bg-[#f85149] opacity-45" />
+            masked by Syncode
+          </span>
+        )}
       </div>
     </div>
   );

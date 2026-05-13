@@ -29,7 +29,10 @@ class Settings(BaseSettings):
     experiments_dir: str = "logs/experiments"
 
     # Feature flags
-    syncode_enabled: bool = False  # Syncode not yet implemented
+    # Set SYNCODE_ENABLED=true in .env to load the Syncode grammar processor
+    # on startup.  Requires `pip install syncode`.  Falls back to raw mode
+    # gracefully if the package is missing.
+    syncode_enabled: bool = False
     model_loaded: bool = False     # Flipped to True after model warm-up
 
 
