@@ -112,6 +112,37 @@ class DecodingStep(BaseModel):
     # Step number (1-indexed) where the first stall was detected, or None.
     whitespace_stall_step: Optional[int] = None
 
+    # --- Pipeline integrity diagnostics ------------------------------------
+    # True when Syncode's grammar mask was applied AND actually changed logits
+    # (not a fallback / identity pass-through).
+    syncode_active: bool = False
+    # True when the masked logit tensor differs from the raw logit tensor at
+    # at least one position (includes both grammar masking AND special-token
+    # suppression applied during the Syncode fallback path).
+    logits_diverge: bool = False
+    # Raw argmax token — what greedy selection on the unmasked distribution
+    # would have chosen.  Always populated.
+    raw_argmax_token_id: int = 0
+    raw_argmax_token: str = ""
+    # Constrained argmax — what greedy selection on the masked distribution
+    # would choose.  Only meaningful when syncode_active=True.
+    constrained_argmax_token_id: int = 0
+    constrained_argmax_token: str = ""
+    # Describes which distribution was actually used for selection:
+    #   "constrained_sampled"  – nucleus sample from grammar-masked distribution
+    #   "constrained_greedy"   – argmax from grammar-masked distribution
+    #   "raw_sampled"          – nucleus sample from unmasked distribution
+    #   "raw_greedy"           – argmax from unmasked distribution
+    #   "fallback_sampled"     – Syncode failed; nucleus sample from raw
+    #   "fallback_greedy"      – Syncode failed; argmax from raw
+    selection_source: str = "raw_greedy"
+    # Number of tokens Syncode's grammar mask newly set to -inf (excludes
+    # tokens that were already -inf in the raw logits and the special-token
+    # suppression layer).
+    grammar_masked_count: int = 0
+    # True when Syncode masked ≥1 whitespace-only token at this step.
+    whitespace_tokens_masked: bool = False
+
 
 # ---------------------------------------------------------------------------
 # Experiment container
