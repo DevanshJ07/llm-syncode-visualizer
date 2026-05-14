@@ -103,6 +103,15 @@ class DecodingStep(BaseModel):
     # the grammar parser failed).
     fallback_used: bool = False
 
+    # --- Whitespace stall detection ----------------------------------------
+    # Number of consecutive whitespace/newline-only tokens up to this step.
+    consecutive_whitespace_count: int = 0
+    # True when the stall threshold was exceeded at this step — generation
+    # is stopped gracefully when this fires.
+    whitespace_stall_detected: bool = False
+    # Step number (1-indexed) where the first stall was detected, or None.
+    whitespace_stall_step: Optional[int] = None
+
 
 # ---------------------------------------------------------------------------
 # Experiment container
@@ -132,10 +141,15 @@ class ExperimentResult(BaseModel):
 class GenerateRequest(BaseModel):
     """POST /generate request body."""
     prompt: str = Field(..., min_length=1, max_length=4096)
-    use_syncode: bool = False   # Syncode not yet implemented; always falls back to raw
+    use_syncode: bool = False
     top_k: int = Field(default=20, ge=1, le=200)
     max_new_tokens: int = Field(default=64, ge=1, le=512)
-    temperature: float = Field(default=1.0, ge=0.01, le=2.0)
+    temperature: float = Field(default=0.8, ge=0.01, le=2.0)
+    # Sampling parameters — enable richer, less deterministic generation so
+    # Syncode constraint effects are clearly visible in the decoding trace.
+    do_sample: bool = True
+    top_p: float = Field(default=0.95, ge=0.0, le=1.0)
+    repetition_penalty: float = Field(default=1.1, ge=1.0, le=2.0)
 
 
 class GenerateResponse(BaseModel):

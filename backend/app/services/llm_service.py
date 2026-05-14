@@ -20,6 +20,70 @@ log = logging.getLogger(__name__)
 # Single worker — Qwen2ForCausalLM is not safe for concurrent forward passes.
 _executor = ThreadPoolExecutor(max_workers=1)
 
+# Consecutive whitespace tokens before graceful stop.
+_WHITESPACE_STALL_THRESHOLD: int = 10
+
+
+# ---------------------------------------------------------------------------
+# Sampling helpers
+# ---------------------------------------------------------------------------
+
+def _apply_repetition_penalty(
+    logits: torch.Tensor,
+    past_ids: list[int],
+    penalty: float,
+) -> torch.Tensor:
+    """
+    Apply repetition penalty (Keskar et al. 2019) to raw logits in-place.
+
+    Tokens that already appeared in past_ids have their logit divided (if
+    positive) or multiplied (if negative) by *penalty*, making them less
+    likely to be re-selected.  penalty=1.0 is a no-op.
+    """
+    if penalty == 1.0 or not past_ids:
+        return logits
+    logits = logits.clone()
+    for token_id in set(past_ids):
+        if token_id < logits.size(0):
+            val = logits[token_id]
+            logits[token_id] = val / penalty if val >= 0 else val * penalty
+    return logits
+
+
+def _nucleus_sample(probs: torch.Tensor, top_p: float) -> int:
+    """
+    Top-p (nucleus) sampling (Holtzman et al. 2020).
+
+    Keeps the smallest set of tokens whose cumulative probability mass exceeds
+    *top_p*, then re-normalises and samples.  Degrades to uniform sampling
+    over the entire distribution when top_p >= 1.0.
+    """
+    if top_p >= 1.0:
+        return int(torch.multinomial(probs.clamp(min=0.0), num_samples=1).item())
+
+    sorted_probs, sorted_indices = torch.sort(probs, descending=True)
+    cumulative_probs = torch.cumsum(sorted_probs, dim=-1)
+
+    # Shift cumulative probs right so the first token is always included,
+    # then zero out tokens past the nucleus boundary.
+    to_remove = (cumulative_probs - sorted_probs) > top_p
+    filtered = sorted_probs.clone()
+    filtered[to_remove] = 0.0
+
+    total = filtered.sum()
+    if total <= 0.0:
+        # Degenerate: fall back to the highest-probability token.
+        return int(sorted_indices[0].item())
+
+    filtered = filtered / total
+    sampled_local_idx = int(torch.multinomial(filtered, num_samples=1).item())
+    return int(sorted_indices[sampled_local_idx].item())
+
+
+def _is_whitespace_token(token_str: str) -> bool:
+    """Return True when a decoded token contains only whitespace/newline chars."""
+    return bool(token_str) and not token_str.strip()
+
 
 # ---------------------------------------------------------------------------
 # Syncode grammar constraint wrapper
@@ -235,26 +299,40 @@ class LLMService:
         masked_logits: "torch.Tensor | None" = None,  # [vocab_size] or None for raw mode
         parser_error_msg: "str | None" = None,        # set when grammar parser threw
         fallback_used: bool = False,                  # True when raw was used as fallback
+        # Sampling parameters
+        do_sample: bool = True,
+        top_p: float = 0.95,
+        repetition_penalty: float = 1.1,
+        past_generated_ids: "list[int] | None" = None,
+        # Whitespace stall metadata (tracked externally, attached here for the step log)
+        consecutive_whitespace: int = 0,
+        whitespace_stall_detected: bool = False,
+        whitespace_stall_step: "int | None" = None,
     ) -> tuple[DecodingStep, int]:
         """
         Compute per-step decoding data from raw (and optionally Syncode-masked) logits.
 
         Raw mode  (masked_logits is None):
-            probs = softmax(logits / T)
-            selected = argmax(probs)
+            probs = softmax(penalized_logits / T)
+            selected = nucleus_sample(probs, top_p)  or argmax when do_sample=False
             top_tokens filled; Syncode fields empty.
 
         Syncode mode  (masked_logits provided):
-            probs_raw    = softmax(logits / T)         → entropy_before, top_tokens_before_syncode
-            probs_masked = softmax(masked_logits / T)  → entropy_after, valid_tokens_after_syncode
-            selected     = argmax(probs_masked)         (from constrained distribution)
+            probs_raw    = softmax(logits / T)                → entropy_before, top_tokens_before_syncode
+            probs_masked = softmax(masked_logits / T)         → entropy_after, valid_tokens_after_syncode
+            selected     = nucleus_sample(penalized_masked_probs, top_p)
             masked_tokens = top-k IDs that were -inf in masked_logits
 
+        Repetition penalty is applied to the logits used for *selection* only;
+        visualisation distributions (entropy, top_tokens) use the raw/masked
+        logits without penalty so the charts reflect the model's true output.
+
         generate_step is intentionally decoupled from the generation loop so
-        that Phase 3 Syncode can inject the masked_logits without touching
-        any probability maths.
+        Syncode can inject masked_logits without touching any probability maths.
         """
-        # ── RAW distribution (always computed) ─────────────────────────────
+        _past = past_generated_ids or []
+
+        # ── RAW distribution (always computed — used for visualisation) ─────
         scaled_raw: torch.Tensor = logits / temperature
         probs_raw: torch.Tensor = F.softmax(scaled_raw, dim=-1)
 
@@ -283,8 +361,16 @@ class LLMService:
                 -(probs_masked * torch.log(probs_masked.clamp(min=1e-12))).sum()
             )
 
-            # Greedy selection from the CONSTRAINED distribution.
-            selected_id: int = int(torch.argmax(probs_masked))
+            # Sampling from the CONSTRAINED distribution.
+            # Apply repetition penalty to masked logits before selection so
+            # previously generated tokens are further suppressed; the
+            # visualisation probs_masked is kept penalty-free for clarity.
+            if do_sample:
+                pen_masked = _apply_repetition_penalty(masked_logits, _past, repetition_penalty)
+                sel_probs_masked = F.softmax(pen_masked / temperature, dim=-1)
+                selected_id: int = _nucleus_sample(sel_probs_masked, top_p)
+            else:
+                selected_id = int(torch.argmax(probs_masked))
 
             # Boolean mask: True where Syncode set a token to -inf.
             # "grammar-invalid" = was finite in raw logits but -inf after masking.
@@ -349,8 +435,13 @@ class LLMService:
             ]
 
         else:
-            # Raw mode — greedy from the unmasked distribution
-            selected_id = int(torch.argmax(probs_raw))
+            # Raw mode — sample (or greedy) from the unmasked distribution.
+            if do_sample:
+                pen_raw = _apply_repetition_penalty(logits, _past, repetition_penalty)
+                sel_probs_raw = F.softmax(pen_raw / temperature, dim=-1)
+                selected_id = _nucleus_sample(sel_probs_raw, top_p)
+            else:
+                selected_id = int(torch.argmax(probs_raw))
             entropy_after = None
             top_tokens_before_syncode = []
             valid_tokens_after_syncode = []
@@ -414,6 +505,10 @@ class LLMService:
             parser_error=parser_error_msg is not None,
             parser_error_message=parser_error_msg or "",
             fallback_used=fallback_used,
+            # Whitespace stall metadata
+            consecutive_whitespace_count=consecutive_whitespace,
+            whitespace_stall_detected=whitespace_stall_detected,
+            whitespace_stall_step=whitespace_stall_step,
         )
         return step, selected_id
 
@@ -428,6 +523,9 @@ class LLMService:
         top_k: int,
         temperature: float,
         use_syncode: bool = False,
+        do_sample: bool = True,
+        top_p: float = 0.95,
+        repetition_penalty: float = 1.1,
     ) -> tuple[str, list[DecodingStep]]:
         """
         Async entry point for FastAPI route handlers.
@@ -435,16 +533,20 @@ class LLMService:
         Dispatches the blocking CPU work to the single-worker
         ThreadPoolExecutor so the asyncio event loop stays free.
         """
+        import functools  # noqa: PLC0415
         loop = asyncio.get_running_loop()
-        return await loop.run_in_executor(
-            _executor,
+        fn = functools.partial(
             self._run_generate_sync,
             prompt,
             max_new_tokens,
             top_k,
             temperature,
             use_syncode,
+            do_sample,
+            top_p,
+            repetition_penalty,
         )
+        return await loop.run_in_executor(_executor, fn)
 
     # ------------------------------------------------------------------
     # _run_generate_sync  (blocking, runs inside executor)
@@ -458,10 +560,14 @@ class LLMService:
         top_k: int,
         temperature: float,
         use_syncode: bool = False,
+        do_sample: bool = True,
+        top_p: float = 0.95,
+        repetition_penalty: float = 1.1,
     ) -> tuple[str, list[DecodingStep]]:
         """
-        Token-by-token greedy generation.  Synchronous / blocking — always
-        called through the ThreadPoolExecutor, never from async context.
+        Token-by-token generation with nucleus sampling and whitespace stall
+        protection.  Synchronous / blocking — always called through the
+        ThreadPoolExecutor, never from async context.
 
         Steps
         -----
@@ -471,8 +577,9 @@ class LLMService:
         4. Full forward pass over the prompt to prime the KV cache.
         5. Loop up to max_new_tokens:
              a. If use_syncode: get grammar mask from _SyncodeConstraint.
-             b. Call generate_step() with optional masked_logits.
-             c. Break on EOS.
+             b. Call generate_step() with sampling params and stall metadata.
+             c. Break on EOS or whitespace stall (>_WHITESPACE_STALL_THRESHOLD
+                consecutive whitespace-only tokens).
              d. Incremental forward pass with new token + cached KV state.
              e. Update all_input_ids (for Syncode context tracking).
         6. Decode and return generated text + step list.
@@ -570,9 +677,15 @@ class LLMService:
             )
 
         log.debug(
-            "Starting generation: max_new_tokens=%d top_k=%d T=%.2f syncode=%s",
-            max_new_tokens, top_k, temperature, effective_syncode,
+            "Starting generation: max_new_tokens=%d top_k=%d T=%.2f "
+            "do_sample=%s top_p=%.2f rep_penalty=%.2f syncode=%s",
+            max_new_tokens, top_k, temperature,
+            do_sample, top_p, repetition_penalty, effective_syncode,
         )
+
+        # Whitespace stall state — reset per generation.
+        consecutive_whitespace_count: int = 0
+        whitespace_stall_step_num: int | None = None
 
         try:
             for step_idx in range(max_new_tokens):
@@ -608,6 +721,12 @@ class LLMService:
                         masked_logits = None
                         step_fallback_used = True
 
+                # Determine if this step is already in a stall (stall fired
+                # on a previous step; we annotate this step too for clarity).
+                step_stall_detected = (
+                    whitespace_stall_step_num is not None
+                )
+
                 step, selected_id = self.generate_step(
                     logits=last_logits,
                     step_idx=step_idx,
@@ -617,6 +736,13 @@ class LLMService:
                     masked_logits=masked_logits,
                     parser_error_msg=step_parser_error,
                     fallback_used=step_fallback_used,
+                    do_sample=do_sample,
+                    top_p=top_p,
+                    repetition_penalty=repetition_penalty,
+                    past_generated_ids=generated_ids,
+                    consecutive_whitespace=consecutive_whitespace_count,
+                    whitespace_stall_detected=step_stall_detected,
+                    whitespace_stall_step=whitespace_stall_step_num,
                 )
                 steps.append(step)
                 generated_ids.append(selected_id)
@@ -624,6 +750,27 @@ class LLMService:
                 if selected_id in eos_ids:
                     log.debug("EOS reached at step %d", step_idx + 1)
                     break
+
+                # ── Whitespace stall detection ──────────────────────────────
+                # Count consecutive tokens that contain only whitespace/newlines.
+                # If the count exceeds the threshold we stop gracefully to avoid
+                # infinite grammar-valid whitespace loops in constrained mode.
+                if _is_whitespace_token(step.selected_token):
+                    consecutive_whitespace_count += 1
+                    if (
+                        consecutive_whitespace_count > _WHITESPACE_STALL_THRESHOLD
+                        and whitespace_stall_step_num is None
+                    ):
+                        whitespace_stall_step_num = step_idx + 1
+                        log.warning(
+                            "Whitespace stall detected at step %d "
+                            "(%d consecutive whitespace tokens) — stopping generation.",
+                            whitespace_stall_step_num,
+                            consecutive_whitespace_count,
+                        )
+                        break
+                else:
+                    consecutive_whitespace_count = 0
 
                 # ── Incremental forward pass ────────────────────────────────
                 next_input = torch.tensor([[selected_id]])  # [1, 1]

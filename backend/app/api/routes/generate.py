@@ -57,6 +57,9 @@ async def generate(request: GenerateRequest) -> GenerateResponse:
             top_k=request.top_k,
             temperature=request.temperature,
             use_syncode=request.use_syncode,
+            do_sample=request.do_sample,
+            top_p=request.top_p,
+            repetition_penalty=request.repetition_penalty,
         )
     except Exception as exc:
         # The generation loop itself has a broad try-except that returns
