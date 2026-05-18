@@ -143,6 +143,20 @@ class DecodingStep(BaseModel):
     # True when Syncode masked ≥1 whitespace-only token at this step.
     whitespace_tokens_masked: bool = False
 
+    # --- Selected token rank in each distribution -------------------------
+    # 0-based rank of the selected token inside the top-k window; -1 when
+    # the token fell outside the top-k entirely.
+    # rank_raw:         rank in raw (unmasked) softmax distribution
+    # rank_constrained: rank in grammar-masked softmax distribution
+    #
+    # Key invariants:
+    #   greedy + syncode_active → selected_token_id == constrained_argmax_token_id
+    #                           → rank_constrained == 0
+    #   greedy + raw mode       → selected_token_id == raw_argmax_token_id
+    #                           → rank_raw == 0
+    selected_rank_raw: int = -1
+    selected_rank_constrained: int = -1
+
 
 # ---------------------------------------------------------------------------
 # Experiment container

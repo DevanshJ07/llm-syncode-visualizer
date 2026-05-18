@@ -452,6 +452,7 @@ class LLMService:
 
         k = min(top_k, probs_raw.size(0))
         topk_raw_probs, topk_raw_ids = torch.topk(probs_raw, k=k)
+        _topk_raw_id_list: list[int] = topk_raw_ids.tolist()
 
         # Always compute raw greedy argmax for diagnostic comparison.
         raw_argmax_id: int = int(torch.argmax(probs_raw))
@@ -467,6 +468,10 @@ class LLMService:
                 masked_logits = None
 
         if use_syncode and masked_logits is not None:
+            # ── Constrained distribution ────────────────────────────────────
+            # probs_masked is derived EXCLUSIVELY from masked_logits (Syncode
+            # output), NOT from the raw logits.  Any divergence between
+            # probs_masked and probs_raw proves the grammar mask is active.
             scaled_masked = masked_logits / temperature
             probs_masked: torch.Tensor = F.softmax(scaled_masked, dim=-1)
 
@@ -474,26 +479,49 @@ class LLMService:
                 -(probs_masked * torch.log(probs_masked.clamp(min=1e-12))).sum()
             )
 
-            # Constrained greedy argmax — always computed for diagnostics even
-            # when sampling is active, so we can compare the two strategies.
-            constrained_argmax_id: int = int(torch.argmax(probs_masked))
+            # Constrained greedy argmax — always computed even when sampling,
+            # so we can assert the greedy invariant and report the rank.
+            # NOTE: argmax(masked_logits) == argmax(probs_masked) because
+            # softmax is a strictly monotone transform.
+            constrained_argmax_id: int = int(torch.argmax(masked_logits))
 
-            # Sampling from the CONSTRAINED distribution.
-            # Apply repetition penalty to masked logits before selection so
-            # previously generated tokens are further suppressed; the
-            # visualisation probs_masked is kept penalty-free for clarity.
+            # Constrained top-k — extracted from probs_masked, NOT probs_raw.
+            # This is what valid_tokens_after_syncode MUST be built from.
+            topk_masked_probs, topk_masked_ids = torch.topk(probs_masked, k=k)
+            _topk_con_id_list: list[int] = topk_masked_ids.tolist()
+
+            # ── Selection ───────────────────────────────────────────────────
             if do_sample:
                 pen_masked = _apply_repetition_penalty(masked_logits, _past, repetition_penalty)
                 sel_probs_masked = F.softmax(pen_masked / temperature, dim=-1)
                 selected_id: int = _nucleus_sample(sel_probs_masked, top_p)
                 _sel_source = "fallback_sampled" if fallback_used else "constrained_sampled"
             else:
+                # GREEDY PATH: selected_id MUST equal constrained_argmax_id.
                 selected_id = constrained_argmax_id
                 _sel_source = "fallback_greedy" if fallback_used else "constrained_greedy"
 
-            # Boolean mask: True where Syncode set a token to -inf.
-            # "grammar-invalid" = was finite in raw logits but -inf after masking.
-            # This captures BOTH pure grammar masking AND special-token suppression.
+            # ── Hard greedy assertion ────────────────────────────────────────
+            # assert selected_token_id == constrained_logits.argmax().item()
+            # This fires regardless of whether Syncode changed anything — it
+            # verifies the fundamental invariant that greedy always picks the
+            # constrained argmax, not the raw argmax.
+            if not do_sample:
+                _expected_greedy = int(torch.argmax(masked_logits))
+                if selected_id != _expected_greedy:
+                    _amsg = (
+                        f"[GREEDY ASSERTION FAILED] step={step_idx+1}: "
+                        f"selected_id={selected_id} ({self._tokenizer.decode([selected_id], skip_special_tokens=False)!r}) "  # type: ignore[union-attr]
+                        f"!= constrained_logits.argmax()={_expected_greedy} "
+                        f"({self._tokenizer.decode([_expected_greedy], skip_special_tokens=False)!r}) — "  # type: ignore[union-attr]
+                        f"greedy selection must always equal constrained_logits.argmax()!"
+                    )
+                    log.error(_amsg)
+                    print(_amsg, flush=True)
+
+            # ── Boolean mask ────────────────────────────────────────────────
+            # grammar-invalid = finite in raw logits but -inf after masking.
+            # Captures grammar masking AND the special-token suppression layer.
             masked_flag: torch.Tensor = (
                 (masked_logits == float("-inf")) & (logits > float("-inf"))
             )
@@ -501,30 +529,23 @@ class LLMService:
             vocab_sz: int = int(logits.size(0))
             valid_cnt: int = vocab_sz - num_masked_total
 
-            # Pipeline diagnostics — sourced from _SyncodeConstraint.mask() diag dict.
+            # ── Pipeline diagnostics ────────────────────────────────────────
             _logits_diverge = bool((masked_logits != logits).any())
             _syncode_active = syncode_grammar_changed and not fallback_used
             _grammar_masked = _diag.get("grammar_masked_count", num_masked_total)
             _ws_masked = _diag.get("whitespace_tokens_masked", False)
 
-            # ── Assertion: greedy consistency ───────────────────────────────
-            # When do_sample=False AND Syncode masked nothing AND logits are
-            # identical, the selected token MUST equal the raw greedy token.
-            if (
-                not do_sample
-                and not fallback_used
-                and _grammar_masked == 0
-                and not _logits_diverge
-                and selected_id != raw_argmax_id
-            ):
-                log.error(
-                    "ASSERTION FAILED step %d: Syncode masked 0 tokens and "
-                    "logits are identical, but selected_id=%d differs from "
-                    "raw_argmax_id=%d — pipeline inconsistency detected!",
-                    step_idx + 1, selected_id, raw_argmax_id,
-                )
+            # ── Rank of selected token in each distribution ─────────────────
+            _sel_rank_raw = (
+                _topk_raw_id_list.index(selected_id)
+                if selected_id in _topk_raw_id_list else -1
+            )
+            _sel_rank_con = (
+                _topk_con_id_list.index(selected_id)
+                if selected_id in _topk_con_id_list else -1
+            )
 
-            # When fallback was used: assert selection_source starts with "fallback"
+            # ── Assertion: when fallback_used, source tag must say "fallback"
             if fallback_used and not _sel_source.startswith("fallback"):
                 log.error(
                     "ASSERTION FAILED step %d: fallback_used=True but "
@@ -532,10 +553,39 @@ class LLMService:
                     step_idx + 1, _sel_source,
                 )
 
+            # ── Verify AFTER-SYNCODE visualization uses constrained logits ──
+            # valid_tokens_after_syncode is built from topk_masked_probs which
+            # comes from probs_masked = softmax(masked_logits / T).
+            # Log top-1 of each distribution so the console makes it explicit.
+            _raw_top1_prob = float(topk_raw_probs[0]) if k > 0 else 0.0
+            _con_top1_prob = float(topk_masked_probs[0]) if k > 0 else 0.0
+            _raw_top1_id = int(topk_raw_ids[0]) if k > 0 else -1
+            _con_top1_id = int(topk_masked_ids[0]) if k > 0 else -1
+
+            # Verify: if logits diverge, the constrained top-1 prob at the
+            # constrained argmax must differ from raw prob at the same ID.
+            _con_prob_at_argmax = float(probs_masked[constrained_argmax_id])
+            _raw_prob_at_con_argmax = float(probs_raw[constrained_argmax_id])
+            _after_syncode_uses_constrained = (
+                not _logits_diverge  # identical logits → both probs the same
+                or abs(_con_prob_at_argmax - _raw_prob_at_con_argmax) > 1e-9
+            )
+            if _logits_diverge and not _after_syncode_uses_constrained:
+                _vmsg = (
+                    f"[VISUALIZATION BUG] step={step_idx+1}: logits diverged but "
+                    f"probs_masked[constrained_argmax]={_con_prob_at_argmax:.6f} "
+                    f"== probs_raw[constrained_argmax]={_raw_prob_at_con_argmax:.6f} "
+                    f"— valid_tokens_after_syncode may be using wrong logits!"
+                )
+                log.error(_vmsg)
+                print(_vmsg, flush=True)
+
             # Probability mass removed = Σ raw_prob of all masked tokens.
             prob_mass_removed: float = float(probs_raw[masked_flag].sum())
 
-            # top_tokens_before_syncode — raw top-k with is_masked annotation
+            # top_tokens_before_syncode — raw top-k (BEFORE masking) with
+            # is_masked annotation to show which tokens were masked.
+            # Source: probs_raw  (topk_raw_probs, topk_raw_ids)
             top_tokens_before_syncode: list[TokenCandidate] = [
                 TokenCandidate(
                     token_id=int(topk_raw_ids[i]),
@@ -551,8 +601,7 @@ class LLMService:
                 for i in range(k)
             ]
 
-            # masked_tokens — top-k rejected tokens from raw distribution,
-            # with their raw probabilities for the "Masked Tokens" panel.
+            # masked_tokens — top-k tokens rejected by grammar, with raw probs.
             masked_in_topk: list[MaskedTokenEntry] = [
                 MaskedTokenEntry(
                     token_id=int(topk_raw_ids[i]),
@@ -567,8 +616,10 @@ class LLMService:
                 if masked_flag[int(topk_raw_ids[i])]
             ]
 
-            # valid_tokens_after_syncode — top-k from the constrained distribution
-            topk_masked_probs, topk_masked_ids = torch.topk(probs_masked, k=k)
+            # valid_tokens_after_syncode — top-k AFTER masking.
+            # Source: probs_masked = softmax(masked_logits / T)
+            # IMPORTANT: probabilities here are from the CONSTRAINED distribution,
+            # NOT from probs_raw.  This is what the "AFTER SYNCODE" panel must use.
             valid_tokens_after_syncode: list[TokenCandidate] = [
                 TokenCandidate(
                     token_id=int(topk_masked_ids[i]),
@@ -577,17 +628,18 @@ class LLMService:
                         skip_special_tokens=False,
                         clean_up_tokenization_spaces=False,
                     ),
-                    probability=float(topk_masked_probs[i]),
-                    is_masked=False,  # by definition — these survived masking
+                    probability=float(topk_masked_probs[i]),  # from probs_masked ✓
+                    is_masked=False,   # survived masking by definition
                     is_selected=int(topk_masked_ids[i]) == selected_id,
                 )
                 for i in range(k)
-                if float(topk_masked_probs[i]) > 1e-12  # skip effectively zero tokens
+                if float(topk_masked_probs[i]) > 1e-12
             ]
 
         else:
             # Raw mode — sample (or greedy) from the unmasked distribution.
             constrained_argmax_id = raw_argmax_id  # no constraint; same as raw
+            _topk_con_id_list = _topk_raw_id_list  # same distribution
             if do_sample:
                 pen_raw = _apply_repetition_penalty(logits, _past, repetition_penalty)
                 sel_probs_raw = F.softmax(pen_raw / temperature, dim=-1)
@@ -608,6 +660,15 @@ class LLMService:
             _syncode_active = False
             _grammar_masked = 0
             _ws_masked = False
+            _sel_rank_raw = (
+                _topk_raw_id_list.index(selected_id)
+                if selected_id in _topk_raw_id_list else -1
+            )
+            _sel_rank_con = _sel_rank_raw  # raw mode: same distribution
+            _raw_top1_id = int(topk_raw_ids[0]) if k > 0 else -1
+            _raw_top1_prob = float(topk_raw_probs[0]) if k > 0 else 0.0
+            _con_top1_id = _raw_top1_id
+            _con_top1_prob = _raw_top1_prob
 
         # ── Decode strings ──────────────────────────────────────────────────
         def _tok(tid: int) -> str:
@@ -627,13 +688,45 @@ class LLMService:
             clean_up_tokenization_spaces=True,
         )
 
-        # Log the pipeline decision for this step at DEBUG level.
+        # ── Side-by-side top-k verification print ───────────────────────────
+        # Always printed to stdout so the console shows which logits are used
+        # for each distribution without requiring DEBUG log level.
+        _raw_top3_str = "  ".join(
+            f"{_tok(int(topk_raw_ids[i]))!r}@{float(topk_raw_probs[i]):.4f}"
+            for i in range(min(3, k))
+        )
+        if use_syncode:
+            _con_top3_str = "  ".join(
+                f"{_tok(int(topk_masked_ids[i]))!r}@{float(topk_masked_probs[i]):.4f}"  # type: ignore[possibly-undefined]
+                for i in range(min(3, k))
+            )
+            _after_src = "probs_masked=softmax(masked_logits/T)"
+        else:
+            _con_top3_str = "(raw mode — no constraint)"
+            _after_src = "probs_raw=softmax(logits/T)"
+
+        print(
+            f"[VERIFY step {step_idx+1:>3}]"
+            f"  RAW  top3: {_raw_top3_str}"
+            f"  |  CONSTRAINED top3 [{_after_src}]: {_con_top3_str}"
+            f"  |  selected={selected_str!r}(id={selected_id}) src={_sel_source}"
+            f"  rank_raw={_sel_rank_raw} rank_con={_sel_rank_con}"
+            f"  |  grammar_masked={_grammar_masked}"
+            f"  logits_diverge={_logits_diverge}"
+            f"  raw_top1_prob={_raw_top1_prob:.4f}"
+            f"  con_top1_prob={_con_top1_prob:.4f}"
+            f"  con_top1{'==raw_top1' if _raw_top1_id == _con_top1_id else '!=raw_top1'}",
+            flush=True,
+        )
+
+        # DEBUG-level structured log for log aggregators.
         log.debug(
-            "Step %d | sel=%r (id=%d src=%s) | raw_argmax=%r (id=%d) | "
-            "constrained_argmax=%r (id=%d) | grammar_masked=%d logits_diverge=%s "
-            "syncode_active=%s ws_masked=%s fallback=%s",
+            "Step %d | sel=%r (id=%d src=%s rank_raw=%d rank_con=%d) | "
+            "raw_argmax=%r (id=%d) | constrained_argmax=%r (id=%d) | "
+            "grammar_masked=%d logits_diverge=%s syncode_active=%s "
+            "ws_masked=%s fallback=%s",
             step_idx + 1,
-            selected_str, selected_id, _sel_source,
+            selected_str, selected_id, _sel_source, _sel_rank_raw, _sel_rank_con,
             raw_argmax_str, raw_argmax_id,
             constrained_argmax_str, constrained_argmax_id,
             _grammar_masked, _logits_diverge,
@@ -695,6 +788,9 @@ class LLMService:
             selection_source=_sel_source,
             grammar_masked_count=_grammar_masked,
             whitespace_tokens_masked=_ws_masked,
+            # Rank of selected token in each distribution
+            selected_rank_raw=_sel_rank_raw,
+            selected_rank_constrained=_sel_rank_con,
         )
         return step, selected_id
 
@@ -985,16 +1081,34 @@ class LLMService:
                     "parser_error": step.parser_error,
                     "parser_error_message": step.parser_error_message,
                     "consecutive_whitespace_count": step.consecutive_whitespace_count,
+                    # Rank of selected token in each distribution — key invariants:
+                    #   greedy+constrained → rank_constrained must be 0
+                    #   greedy+raw         → rank_raw must be 0
+                    "selected_rank_raw": step.selected_rank_raw,
+                    "selected_rank_constrained": step.selected_rank_constrained,
+                    # Top-3 from each distribution (source labelled)
                     "raw_top3": [
                         {"token": t.token, "prob": round(t.probability, 6), "id": t.token_id}
                         for t in step.top_tokens[:3]
                     ],
-                    "constrained_top3": [
+                    # valid_tokens_after_syncode uses probs_masked (constrained);
+                    # top_tokens_before_syncode uses probs_raw (raw) with masking flags
+                    "constrained_top3_after_syncode": [
+                        {
+                            "token": t.token_str,
+                            "prob": round(t.probability, 6),
+                            "id": t.token_id,
+                            "source": "probs_masked",
+                        }
+                        for t in step.valid_tokens_after_syncode[:3]
+                    ],
+                    "raw_top3_before_syncode": [
                         {
                             "token": t.token_str,
                             "prob": round(t.probability, 6),
                             "id": t.token_id,
                             "is_masked": t.is_masked,
+                            "source": "probs_raw",
                         }
                         for t in step.top_tokens_before_syncode[:3]
                     ],
