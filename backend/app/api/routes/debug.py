@@ -35,11 +35,22 @@ async def get_syncode_status() -> dict:
     """
     syncode_obj = llm_service._syncode  # type: ignore[attr-defined]
     ws_count = len(syncode_obj._whitespace_ids) if syncode_obj is not None else 0
+    patch_status = getattr(syncode_obj, "_patch_status", {"installed": "unknown"}) if syncode_obj else {}
+    mask_calls = getattr(syncode_obj, "_mask_call_count", 0) if syncode_obj else 0
+    # Verify patch is actually in ge.__dict__ right now
+    ge_has_patch = False
+    if syncode_obj is not None and syncode_obj._processor is not None:
+        ge = getattr(syncode_obj._processor, "grammar_engine", None)
+        if ge is not None:
+            ge_has_patch = "mask_scores" in ge.__dict__
     return {
         "syncode_enabled": settings.syncode_enabled,
         "model_loaded": llm_service.is_loaded,
         "syncode_available": syncode_obj.available if syncode_obj is not None else False,
         "whitespace_token_count": ws_count,
+        "patch_status": patch_status,
+        "mask_call_count": mask_calls,
+        "ge_dict_has_patch_live": ge_has_patch,
     }
 
 

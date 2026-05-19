@@ -214,6 +214,7 @@ class _SyncodeConstraint:
         we only observe inputs and outputs at each internal call.
         """
         if self._processor is None:
+            self._patch_status: dict = {"installed": False, "reason": "processor is None"}
             return
         ge = self._processor.grammar_engine
 
@@ -233,6 +234,19 @@ class _SyncodeConstraint:
             step = self._forensic_step[0]
             self._forensic_step[0] += 1
 
+            # Unconditional sentinel — proves this function was invoked.
+            # Must be the very first operation; nothing above can raise.
+            forensic_log.append({"_sentinel": True, "step": step})
+
+            try:
+                return _patched_mask_scores_impl(step, input_ids, scores)
+            except Exception as _outer_exc:
+                forensic_log[-1]["_outer_exception"] = (
+                    f"{type(_outer_exc).__name__}: {_outer_exc}"
+                )
+                raise  # re-raise so syncode.mask()'s except clause handles it
+
+        def _patched_mask_scores_impl(step: int, input_ids: "torch.Tensor", scores: "torch.Tensor") -> "torch.Tensor":
             # --- capture partial_output -----------------------------------------
             # NOTE: ge.start_from may still be None here (set inside original_mask_scores).
             # We attempt _get_partial_outputs anyway; it handles None gracefully.
@@ -280,7 +294,7 @@ class _SyncodeConstraint:
                 _skip_results.append(skip)
                 if res is not None:
                     _accept_seqs.extend(
-                        [str(s) for s in getattr(res, "accept_sequences", [])[:6]]
+                        [str(s) for s in list(getattr(res, "accept_sequences", []))[:6]]
                     )
                     _rem_state.append(str(getattr(res, "remainder_state", "?")))
                 return res, skip
@@ -326,7 +340,7 @@ class _SyncodeConstraint:
                     "sample_ws_invalid_ids": sample_ws_invalid,
                     "first_valid_ids": first_valid,
                     "accept_seqs_at_mask": [
-                        str(s) for s in getattr(res, "accept_sequences", [])[:6]
+                        str(s) for s in list(getattr(res, "accept_sequences", []))[:6]
                     ],
                 })
                 return mask
@@ -335,6 +349,10 @@ class _SyncodeConstraint:
             ge._parse_partial_output = patched_parse_partial
             ge.dfa_mask_store.get_accept_mask = patched_get_accept_mask
             ge.inc_parser.get_acceptable_next_terminals = patched_get_terms
+            # Clone BEFORE calling original so we can compare before/after.
+            # GrammarConstrainer.mask_scores modifies scores IN PLACE, meaning
+            # result IS scores after the call and naive (result != scores) == 0.
+            scores_before = scores.clone()
             try:
                 result = original_mask_scores(input_ids, scores)
             finally:
@@ -343,9 +361,9 @@ class _SyncodeConstraint:
                 ge.inc_parser.get_acceptable_next_terminals = original_get_terms
 
             # --- analyse result -------------------------------------------------
-            n_changed = int((result != scores).sum())
+            n_changed = int((result != scores_before).sum())
             n_newly_inf = int(
-                ((result == float("-inf")) & (scores > float("-inf"))).sum()
+                ((result == float("-inf")) & (scores_before > float("-inf"))).sum()
             )
 
             # Root-cause diagnosis --------------------------------------------------
@@ -407,6 +425,13 @@ class _SyncodeConstraint:
             return result
 
         ge.mask_scores = patched_mask_scores
+        self._patch_status = {
+            "installed": True,
+            "ge_id": id(ge),
+            "ge_dict_has_mask_scores": "mask_scores" in ge.__dict__,
+            "patched_fn_name": ge.__dict__.get("mask_scores", object).__name__
+            if "mask_scores" in ge.__dict__ else "NOT_FOUND",
+        }
         print(
             f"[FORENSIC] Installed forensic patch on grammar_engine.mask_scores "
             f"(grammar={self._grammar_name})",
@@ -437,7 +462,7 @@ class _SyncodeConstraint:
 
             # Probe 1: empty partial output (step 0 condition)
             res = ip.get_acceptable_next_terminals("")
-            accept_seqs = [str(s) for s in res.accept_sequences[:8]]
+            accept_seqs = [str(s) for s in list(res.accept_sequences)[:8]]
             rem_state = str(res.remainder_state)
 
             accept_mask = ge.dfa_mask_store.get_accept_mask(res)
@@ -577,20 +602,46 @@ class _SyncodeConstraint:
         }
         if not self._available or self._processor is None:
             return None, None, diag
+
+        # Track total mask() calls for API-accessible diagnostics.
+        self._mask_call_count = getattr(self, "_mask_call_count", 0) + 1
+
+        # ── Forensic patch health-check (step 0 only) ──────────────────────
+        if step_idx == 0:
+            ge = getattr(self._processor, "grammar_engine", None)
+            if ge is not None:
+                ms = ge.__dict__.get("mask_scores")
+                ms_name = getattr(ms, "__name__", type(ms).__name__) if ms else "NOT_IN_DICT"
+                flog_len = len(getattr(self, "_forensic_log", []))
+                print(
+                    f"[DIAG step 0] ge.mask_scores in __dict__={ms is not None}"
+                    f"  name={ms_name}"
+                    f"  forensic_log_len={flog_len}"
+                    f"  ge.start_from={ge.start_from}"
+                    f"  ge.parse_failed={ge.parse_failed}",
+                    flush=True,
+                )
+
         try:
+            # Clone BEFORE calling _processor: GrammarConstrainer.mask_scores
+            # modifies the scores tensor IN PLACE and returns the same object.
+            # Without this clone, `logits` == `out` (same tensor after the call),
+            # so all before/after comparisons would be trivially zero.
+            logits_snapshot = logits.clone()
+
             out: torch.Tensor = self._processor(
                 input_ids=all_input_ids,
-                scores=logits.unsqueeze(0),  # [1, vocab_size]
+                scores=logits.unsqueeze(0),  # [1, vocab_size] — may be modified in place
             )
             out = out.squeeze(0)  # [vocab_size]
 
             # ── Diagnostics ────────────────────────────────────────────────
-            # Tokens that were finite in raw but become -inf after masking.
+            # Tokens that were finite in the raw logits but become -inf after masking.
             newly_masked: torch.Tensor = (
-                (out == float("-inf")) & (logits > float("-inf"))
+                (out == float("-inf")) & (logits_snapshot > float("-inf"))
             )
             n_newly_masked = int(newly_masked.sum())
-            logits_changed = bool((out != logits).any())
+            logits_changed = bool((out != logits_snapshot).any())
 
             # Whitespace coverage — are whitespace tokens masked or accepted?
             ws_ids_tensor = torch.tensor(
@@ -1236,22 +1287,32 @@ class LLMService:
             log.debug("Syncode parse state reset for new generation")
 
         # ── Format prompt ───────────────────────────────────────────────────
-        # In Syncode/C-grammar mode we MUST NOT use the chat template.
+        # In Syncode/C-grammar mode we MUST NOT use the chat template (it adds
+        # <|im_start|>/<|im_end|> control tokens that the C grammar cannot parse).
         #
-        # The chat template wraps the prompt in <|im_start|>user…<|im_end|>
-        # <|im_start|>assistant\n.  The model then assigns high probability to
-        # conversational preamble tokens ("Sure, here's a function…") that the
-        # C LALR grammar cannot parse.  When the grammar parser fails it falls
-        # back to unconstrained decoding, at which point the model's top-1
-        # token is the chat EOS token <|im_end|> — producing the observed
-        # "c<|im_end|>" output.
+        # Prompt format choice — why "/* prompt */" not "// prompt":
         #
-        # A C-comment completion prompt sidesteps this:
-        #   - The model is anchored to produce C code from token 0
-        #   - The grammar starts from its root state (valid for any C file)
-        #   - No chat control tokens appear in either direction
+        # The Syncode C grammar (c.lark) is C89-only and WIP.  Its start rule is:
+        #     start: declaration*
+        #     declaration: data_type NAME "(" parameters? ")" "{" statement* "}"
+        # Comments (both // and /* */) are only valid as STATEMENTS inside a
+        # function body, NOT at the top level.  With parse_output_only=True the
+        # grammar parses only the GENERATED tokens starting from the initial state
+        # (start: declaration*), so it always expects a type keyword first.
+        #
+        # "// prompt\n" caused the model to generate more // comment continuation
+        # tokens.  The LALR parser threw UnexpectedToken('SLASH', '/') at token 1,
+        # permanently setting parse_failed=True and disabling ALL masking.
+        #
+        # "/* prompt */\n" closes before any generated tokens: the model sees a
+        # completed documentation comment and naturally generates a full function
+        # definition (int foo(...) { ... }).  The grammar parser sees "int" as its
+        # first token — exactly what declaration* expects — and masking activates.
+        #
+        # Guard against embedded */ in the prompt that would close the comment early.
         if effective_syncode:
-            formatted_prompt: str = f"// {prompt}\n"
+            _safe_prompt = prompt.replace("*/", "* /")
+            formatted_prompt: str = f"/* {_safe_prompt} */\n"
         elif callable(getattr(self._tokenizer, "apply_chat_template", None)):
             formatted_prompt = self._tokenizer.apply_chat_template(  # type: ignore[union-attr]
                 [{"role": "user", "content": prompt}],
@@ -1342,9 +1403,26 @@ class LLMService:
                 step_syncode_diag: dict = {}
 
                 if effective_syncode and self._syncode is not None:
+                    # GrammarConstrainer.mask_scores modifies scores IN PLACE via the
+                    # logits.unsqueeze(0) view, so after mask() returns:
+                    #   • last_logits has been corrupted with -inf on masked tokens
+                    #   • masked_logits is a view of last_logits (same storage)
+                    # Strategy:
+                    #   1. Snapshot raw logits before the call.
+                    #   2. After mask(), clone masked_logits before restoring last_logits.
+                    #   3. Pass raw snapshot as `logits` and the clone as `masked_logits`
+                    #      to generate_step so the raw vs. masked comparison is valid.
+                    raw_logits_snapshot = last_logits.clone()
                     masked_logits, step_parser_error, step_syncode_diag = (
                         self._syncode.mask(all_input_ids, last_logits, step_idx)
                     )
+                    # Clone masked_logits now (before restoring last_logits) so it
+                    # keeps the -inf values independent of last_logits.
+                    if masked_logits is not None:
+                        masked_logits = masked_logits.clone()
+                    # Restore last_logits to the original raw values so the next
+                    # iteration and the raw-side visualization are unaffected.
+                    last_logits.copy_(raw_logits_snapshot)
 
                     # True when Syncode's grammar mask (before special-token
                     # suppression) actually changed at least one logit value.
@@ -1383,7 +1461,7 @@ class LLMService:
                 )
 
                 step, selected_id = self.generate_step(
-                    logits=last_logits,
+                    logits=raw_logits_snapshot if (effective_syncode and self._syncode is not None) else last_logits,
                     step_idx=step_idx,
                     context_ids=generated_ids,
                     top_k=top_k,
