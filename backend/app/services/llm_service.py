@@ -128,6 +128,7 @@ class _SyncodeConstraint:
         self._processor = None
         self._available = False
         self._tokenizer = tokenizer
+        self._grammar_name = grammar
         # Whitespace token IDs — precomputed once for fast per-step checking.
         self._whitespace_ids: frozenset[int] = self._build_whitespace_ids(tokenizer)
         log.info(
@@ -154,6 +155,10 @@ class _SyncodeConstraint:
             )
             self._available = True
             log.info("Syncode ready (grammar=%s)", grammar)
+
+            # Install forensic instrumentation and run init probe.
+            self._install_forensic_patch()
+            self._forensic_init_probe()
 
         except ImportError:
             log.warning(
@@ -190,6 +195,344 @@ class _SyncodeConstraint:
     @property
     def available(self) -> bool:
         return self._available
+
+    # ------------------------------------------------------------------
+    # Forensic instrumentation
+    # ------------------------------------------------------------------
+
+    def _install_forensic_patch(self) -> None:
+        """
+        Monkey-patch grammar_engine.mask_scores so that every call to
+        SyncodeLogitsProcessor.__call__ → GrammarConstrainer.mask_scores
+        is wrapped with step-level forensic logging.
+
+        Interception points inside mask_scores:
+          • ge._parse_partial_output  → captures skip flag and partial_output
+          • ge.dfa_mask_store.get_accept_mask → captures accept_mask stats
+
+        This is a pure read-side patch: the original logic runs unchanged;
+        we only observe inputs and outputs at each internal call.
+        """
+        if self._processor is None:
+            return
+        ge = self._processor.grammar_engine
+
+        # Step counter shared across the closure (reset each generation).
+        self._forensic_step: list[int] = [0]
+        forensic_log: list[dict] = []
+        self._forensic_log = forensic_log
+
+        original_mask_scores = ge.mask_scores
+        original_get_accept_mask = ge.dfa_mask_store.get_accept_mask
+        original_parse_partial = ge._parse_partial_output
+        original_get_terms = ge.inc_parser.get_acceptable_next_terminals
+
+        ws_ids = self._whitespace_ids
+
+        def patched_mask_scores(input_ids: "torch.Tensor", scores: "torch.Tensor") -> "torch.Tensor":
+            step = self._forensic_step[0]
+            self._forensic_step[0] += 1
+
+            # --- capture partial_output -----------------------------------------
+            # NOTE: ge.start_from may still be None here (set inside original_mask_scores).
+            # We attempt _get_partial_outputs anyway; it handles None gracefully.
+            try:
+                partial_list = ge._get_partial_outputs(input_ids)
+                partial_str = partial_list[0][0] if partial_list else ""
+                remainder_b = partial_list[0][1] if partial_list else b""
+            except Exception as _pe:
+                partial_str = f"<get_partial_outputs failed: {_pe}>"
+                remainder_b = b""
+
+            # --- intercept inc_parser.get_acceptable_next_terminals -------------
+            # This is the method inside _parse_partial_output that actually raises
+            # on a grammar parse error.  By patching it we capture the exception
+            # before _parse_partial_output's except clause swallows it.
+            _parse_exceptions: list[str] = []
+            _parse_inputs: list[str] = []
+
+            def patched_get_terms(partial_code: str):
+                _parse_inputs.append(partial_code[:80])
+                try:
+                    result = original_get_terms(partial_code)
+                    return result
+                except Exception as _exc:
+                    _parse_exceptions.append(
+                        f"{type(_exc).__name__}: {str(_exc)[:120]}"
+                    )
+                    # Re-raise so _parse_partial_output's except clause handles it normally
+                    raise
+
+            # --- intercept _parse_partial_output --------------------------------
+            _skip_results: list[bool] = []
+            _accept_seqs: list = []
+            _rem_state: list = []
+
+            def patched_parse_partial(
+                idx: int,
+                partial_output: str,
+                remainder_bytes: bytes,
+                accepted_generation: bool = True,
+            ) -> "tuple":
+                res, skip = original_parse_partial(
+                    idx, partial_output, remainder_bytes, accepted_generation
+                )
+                _skip_results.append(skip)
+                if res is not None:
+                    _accept_seqs.extend(
+                        [str(s) for s in getattr(res, "accept_sequences", [])[:6]]
+                    )
+                    _rem_state.append(str(getattr(res, "remainder_state", "?")))
+                return res, skip
+
+            # --- intercept get_accept_mask --------------------------------------
+            _mask_stats: list[dict] = []
+
+            def patched_get_accept_mask(res: object) -> "torch.Tensor":
+                mask = original_get_accept_mask(res)
+                n_acc = int(mask.sum())
+                total = int(mask.numel())
+                all_v = bool(mask.all())
+                all_inv = not bool(mask.any())
+
+                # Are whitespace token IDs inside the accept window?
+                ws_valid = 0
+                ws_invalid = 0
+                sample_ws_valid: list[int] = []
+                sample_ws_invalid: list[int] = []
+                for wid in sorted(ws_ids):
+                    if wid >= total:
+                        continue
+                    if mask[wid]:
+                        ws_valid += 1
+                        if len(sample_ws_valid) < 5:
+                            sample_ws_valid.append(wid)
+                    else:
+                        ws_invalid += 1
+                        if len(sample_ws_invalid) < 5:
+                            sample_ws_invalid.append(wid)
+
+                first_valid = mask.nonzero(as_tuple=True)[0][:10].tolist()
+
+                _mask_stats.append({
+                    "n_accepted": n_acc,
+                    "vocab_len": total,
+                    "pct": round(n_acc / total * 100, 2) if total else 0.0,
+                    "all_valid": all_v,
+                    "all_invalid": all_inv,
+                    "ws_valid": ws_valid,
+                    "ws_invalid": ws_invalid,
+                    "sample_ws_valid_ids": sample_ws_valid,
+                    "sample_ws_invalid_ids": sample_ws_invalid,
+                    "first_valid_ids": first_valid,
+                    "accept_seqs_at_mask": [
+                        str(s) for s in getattr(res, "accept_sequences", [])[:6]
+                    ],
+                })
+                return mask
+
+            # Patch, run, unpatch ------------------------------------------------
+            ge._parse_partial_output = patched_parse_partial
+            ge.dfa_mask_store.get_accept_mask = patched_get_accept_mask
+            ge.inc_parser.get_acceptable_next_terminals = patched_get_terms
+            try:
+                result = original_mask_scores(input_ids, scores)
+            finally:
+                ge._parse_partial_output = original_parse_partial
+                ge.dfa_mask_store.get_accept_mask = original_get_accept_mask
+                ge.inc_parser.get_acceptable_next_terminals = original_get_terms
+
+            # --- analyse result -------------------------------------------------
+            n_changed = int((result != scores).sum())
+            n_newly_inf = int(
+                ((result == float("-inf")) & (scores > float("-inf"))).sum()
+            )
+
+            # Root-cause diagnosis --------------------------------------------------
+            skip_flag = bool(_skip_results[0]) if _skip_results else None
+            if _parse_exceptions:
+                diagnosis = (
+                    f"PARSE_EXCEPTION → {_parse_exceptions[0]} "
+                    f"[input: {(_parse_inputs[0] if _parse_inputs else '?')!r}]"
+                )
+            elif skip_flag is True:
+                diagnosis = "PARSE_FAILED_SKIP → scores returned unchanged (exception in earlier step)"
+            elif _mask_stats and _mask_stats[0]["all_invalid"]:
+                diagnosis = "ACCEPT_MASK_ALL_ZEROS → no valid tokens → scores returned unchanged"
+            elif _mask_stats and _mask_stats[0]["all_valid"]:
+                diagnosis = "ACCEPT_MASK_ALL_ONES → grammar accepts FULL vocab → no masking"
+            elif n_newly_inf == 0 and n_changed == 0:
+                diagnosis = "NO_CHANGE: logits identical to input (cause unknown)"
+            else:
+                diagnosis = f"MASKING_APPLIED: {n_newly_inf} tokens newly -inf"
+
+            step_record: dict = {
+                "step": step,
+                "partial_output": partial_str[:100],
+                "remainder_bytes": repr(remainder_b[:20]),
+                "ge_start_from": ge.start_from,
+                "ge_parse_failed": ge.parse_failed,
+                "ge_ignore_whitespace": ge._ignore_whitespace,
+                "skip": skip_flag,
+                "parse_input": _parse_inputs[:2],
+                "parse_exception": _parse_exceptions[:2],
+                "accept_seqs": _accept_seqs[:6],
+                "remainder_state": _rem_state[:1],
+                "mask_stats": _mask_stats[:1],
+                "n_changed": n_changed,
+                "n_newly_inf": n_newly_inf,
+                "diagnosis": diagnosis,
+            }
+            forensic_log.append(step_record)
+
+            # Always print first 10 steps; print afterwards only when masking changes
+            if step < 10 or n_newly_inf > 0 or _parse_exceptions:
+                ms = _mask_stats[0] if _mask_stats else {}
+                exc_str = _parse_exceptions[0][:80] if _parse_exceptions else "none"
+                print(
+                    f"[FORENSIC step {step:>3}]"
+                    f"  partial={partial_str[:40]!r}"
+                    f"  start_from={ge.start_from}"
+                    f"  skip={skip_flag}"
+                    f"  n_accepted={ms.get('n_accepted','?')}/{ms.get('vocab_len','?')}"
+                    f"  ({ms.get('pct','?')}%)"
+                    f"  all_valid={ms.get('all_valid','?')}"
+                    f"  ws_valid={ms.get('ws_valid','?')}"
+                    f"  n_newly_inf={n_newly_inf}"
+                    f"  parse_exc={exc_str!r}"
+                    f"  → {diagnosis}",
+                    flush=True,
+                )
+
+            return result
+
+        ge.mask_scores = patched_mask_scores
+        print(
+            f"[FORENSIC] Installed forensic patch on grammar_engine.mask_scores "
+            f"(grammar={self._grammar_name})",
+            flush=True,
+        )
+
+    def _forensic_init_probe(self) -> None:
+        """
+        Cold probe: immediately after processor init, call
+        get_acceptable_next_terminals('') to characterise what the grammar
+        accepts at the initial (empty-output) state and how many vocab tokens
+        pass the DFA mask.  Resets the parser afterward.
+        """
+        if self._processor is None:
+            return
+        ge = self._processor.grammar_engine
+
+        print(
+            f"\n[FORENSIC INIT PROBE] grammar={self._grammar_name}"
+            f"  ignore_whitespace={ge._ignore_whitespace}"
+            f"  parse_output_only={ge.parse_output_only}"
+            f"  whitespace_ids={len(self._whitespace_ids)}",
+            flush=True,
+        )
+
+        try:
+            ip = ge.inc_parser
+
+            # Probe 1: empty partial output (step 0 condition)
+            res = ip.get_acceptable_next_terminals("")
+            accept_seqs = [str(s) for s in res.accept_sequences[:8]]
+            rem_state = str(res.remainder_state)
+
+            accept_mask = ge.dfa_mask_store.get_accept_mask(res)
+            n_acc = int(accept_mask.sum())
+            total = int(accept_mask.numel())
+            all_v = bool(accept_mask.all())
+            first_valid = accept_mask.nonzero(as_tuple=True)[0][:20].tolist()
+
+            ws_valid = sum(
+                1 for wid in self._whitespace_ids
+                if wid < total and accept_mask[wid]
+            )
+            ws_invalid = sum(
+                1 for wid in self._whitespace_ids
+                if wid < total and not accept_mask[wid]
+            )
+
+            print(
+                f"[FORENSIC INIT PROBE] empty input →"
+                f"  remainder_state={rem_state}"
+                f"  accept_seqs={accept_seqs}"
+                f"  n_accepted={n_acc}/{total} ({n_acc/total*100:.1f}%)"
+                f"  all_valid={all_v}"
+                f"  ws_valid={ws_valid}  ws_invalid={ws_invalid}"
+                f"  first_valid_ids={first_valid}",
+                flush=True,
+            )
+
+            if all_v:
+                print(
+                    "[FORENSIC INIT PROBE] *** ROOT CAUSE CANDIDATE: "
+                    "grammar accepts ALL tokens at initial state (overapproximation) "
+                    "→ no masking will ever occur ***",
+                    flush=True,
+                )
+            elif ws_valid > 0 and ws_invalid == 0:
+                print(
+                    "[FORENSIC INIT PROBE] *** NOTE: ALL whitespace tokens are "
+                    "grammar-valid at initial state → whitespace loop cannot be "
+                    "prevented by grammar masking alone ***",
+                    flush=True,
+                )
+
+            ip.reset()
+            print("[FORENSIC INIT PROBE] Parser reset after probe.", flush=True)
+
+        except Exception as exc:
+            print(
+                f"[FORENSIC INIT PROBE] probe failed: {type(exc).__name__}: {exc}",
+                flush=True,
+            )
+            import traceback  # noqa: PLC0415
+            traceback.print_exc()
+
+    @property
+    def forensic_log(self) -> list:
+        """Return accumulated per-step forensic records (since last patch install)."""
+        return getattr(self, "_forensic_log", [])
+
+    def forensic_summary(self) -> dict:
+        """Summarise the forensic log for the last generation."""
+        log_entries = self.forensic_log
+        if not log_entries:
+            return {"steps": 0, "note": "no forensic data yet"}
+
+        n_skip = sum(1 for e in log_entries if e.get("skip") is True)
+        n_all_valid = sum(
+            1 for e in log_entries
+            if e.get("mask_stats") and e["mask_stats"][0].get("all_valid")
+        )
+        n_all_invalid = sum(
+            1 for e in log_entries
+            if e.get("mask_stats") and e["mask_stats"][0].get("all_invalid")
+        )
+        n_masking_applied = sum(1 for e in log_entries if e.get("n_newly_inf", 0) > 0)
+        n_parse_exception = sum(1 for e in log_entries if e.get("parse_exception"))
+        diagnoses = list({e.get("diagnosis", "?") for e in log_entries})
+
+        # Find the FIRST step where a parse exception was thrown
+        first_exc_step = next(
+            (e for e in log_entries if e.get("parse_exception")), None
+        )
+
+        return {
+            "total_steps": len(log_entries),
+            "skip_steps": n_skip,
+            "parse_exception_steps": n_parse_exception,
+            "all_valid_mask_steps": n_all_valid,
+            "all_invalid_mask_steps": n_all_invalid,
+            "masking_applied_steps": n_masking_applied,
+            "unique_diagnoses": diagnoses,
+            "first_parse_exception_step": first_exc_step,
+            "first_step": log_entries[0] if log_entries else None,
+            "last_step": log_entries[-1] if log_entries else None,
+        }
 
     def reset(self) -> None:
         """Reset parse state — MUST be called before each new generation."""
@@ -885,6 +1228,11 @@ class LLMService:
         # grammar state (the processor is reused across requests).
         if effective_syncode and self._syncode is not None:
             self._syncode.reset()
+            # Reset forensic step counter and clear accumulated log for this run.
+            if hasattr(self._syncode, "_forensic_step"):
+                self._syncode._forensic_step[0] = 0
+            if hasattr(self._syncode, "_forensic_log"):
+                self._syncode._forensic_log.clear()
             log.debug("Syncode parse state reset for new generation")
 
         # ── Format prompt ───────────────────────────────────────────────────

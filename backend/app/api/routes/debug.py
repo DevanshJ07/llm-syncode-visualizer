@@ -1,21 +1,10 @@
 """
 Debug / diagnostic endpoints.
 
-GET /debug/last-trace
-    Returns the full step-by-step diagnostic trace from the most recent
-    generation.  Every step carries:
-      • selection_source         – which distribution was used
-      • raw_argmax / constrained_argmax – greedy choices from each dist
-      • grammar_masked_count     – tokens masked by Syncode grammar
-      • logits_diverge           – whether constrained ≠ raw logits
-      • whitespace_tokens_masked – did grammar mask whitespace tokens?
-      • raw_top3 / constrained_top3 – top candidates from each dist
-      • entropy_before / entropy_after
-      • fallback_used / parser_error
-
-GET /debug/syncode-status
-    Returns Syncode availability, whitespace token count, and the
-    current settings.syncode_enabled flag.
+GET /debug/last-trace         – full step-by-step generation trace
+GET /debug/syncode-status     – Syncode availability and config
+GET /debug/forensic-summary   – per-step forensic trace of grammar_engine.mask_scores
+GET /debug/forensic-full      – raw forensic log (all steps, all fields)
 
 These endpoints are read-only and never modify generation state.
 """
@@ -34,30 +23,6 @@ router = APIRouter()
 async def get_last_trace() -> dict:
     """
     Return the full diagnostic trace from the last completed generation.
-
-    Summary fields (top-level):
-        generation_id, prompt, mode, effective_syncode
-        summary.total_steps
-        summary.syncode_active_steps   – steps where grammar mask changed logits
-        summary.fallback_steps         – steps where Syncode fell back to raw
-        summary.logits_diverge_steps   – steps where masked ≠ raw logits
-        summary.grammar_masked_any_steps
-        summary.whitespace_tokens_masked_steps
-        summary.whitespace_stall_steps
-        summary.whitespace_stall_step_num
-        summary.generated_text_preview
-
-    Per-step fields (in ``steps`` array):
-        step, selected_token, selected_token_id, selection_source
-        raw_argmax_token, raw_argmax_token_id
-        constrained_argmax_token, constrained_argmax_token_id
-        syncode_active, logits_diverge
-        grammar_masked_count, num_masked_total, masked_percentage
-        whitespace_tokens_masked, whitespace_tokens_accepted
-        entropy_before, entropy_after
-        fallback_used, parser_error, parser_error_message
-        consecutive_whitespace_count
-        raw_top3, constrained_top3
     """
     with _trace_lock:
         return dict(_last_trace)
@@ -67,12 +32,6 @@ async def get_last_trace() -> dict:
 async def get_syncode_status() -> dict:
     """
     Report Syncode availability and configuration.
-
-    Fields:
-        syncode_enabled        – settings.SYNCODE_ENABLED flag
-        model_loaded           – whether the model has been loaded
-        syncode_available      – whether _SyncodeConstraint initialised OK
-        whitespace_token_count – vocabulary IDs that decode to whitespace-only
     """
     syncode_obj = llm_service._syncode  # type: ignore[attr-defined]
     ws_count = len(syncode_obj._whitespace_ids) if syncode_obj is not None else 0
@@ -82,3 +41,46 @@ async def get_syncode_status() -> dict:
         "syncode_available": syncode_obj.available if syncode_obj is not None else False,
         "whitespace_token_count": ws_count,
     }
+
+
+@router.get("/debug/forensic-summary", tags=["Debug"])
+async def get_forensic_summary() -> dict:
+    """
+    Return a high-level summary of the forensic log gathered by the
+    monkey-patched grammar_engine.mask_scores during the last generation.
+
+    Key fields:
+        total_steps          – how many steps ran through the forensic patch
+        skip_steps           – steps where _parse_partial_output returned skip=True
+                               (grammar parsing failed → scores returned unchanged)
+        all_valid_mask_steps – steps where accept_mask was all-ones
+                               (grammar accepted every vocab token → no masking)
+        all_invalid_mask_steps – steps where accept_mask was all-zeros
+                               (no valid tokens found → scores returned unchanged)
+        masking_applied_steps – steps where ≥1 token was newly set to -inf
+        unique_diagnoses     – set of root-cause labels seen across all steps
+        first_step / last_step – detailed record for first and last step
+    """
+    syncode_obj = llm_service._syncode  # type: ignore[attr-defined]
+    if syncode_obj is None:
+        return {"error": "Syncode not initialised"}
+    return syncode_obj.forensic_summary()
+
+
+@router.get("/debug/forensic-full", tags=["Debug"])
+async def get_forensic_full() -> dict:
+    """
+    Return every step record from the last generation's forensic log.
+
+    Each record contains:
+        step, partial_output, ge_start_from, ge_parse_failed,
+        ge_ignore_whitespace, skip, accept_seqs, remainder_state,
+        mask_stats (n_accepted, vocab_len, pct, all_valid, all_invalid,
+                    ws_valid, ws_invalid, first_valid_ids),
+        n_changed, n_newly_inf, diagnosis
+    """
+    syncode_obj = llm_service._syncode  # type: ignore[attr-defined]
+    if syncode_obj is None:
+        return {"error": "Syncode not initialised"}
+    entries = syncode_obj.forensic_log
+    return {"total_steps": len(entries), "steps": entries}
