@@ -3,11 +3,9 @@
 /**
  * useGeneration hook
  *
- * POST /generate now returns the full decoding trace inline, so there is
- * no longer a second GET /experiment/{id} round-trip.
- *
- * The hook converts the GenerateResponse into an ExperimentResult shape so
- * the rest of the UI (experiment page, timeline, charts) stays unchanged.
+ * POST /generate returns the full decoding trace inline.
+ * Empty or invalid traces are rejected — the hook surfaces HTTP 500 errors
+ * from the backend and never enters "done" with zero steps.
  */
 
 import { useState, useCallback } from "react";
@@ -38,13 +36,10 @@ export function useGeneration(): UseGenerationReturn {
     try {
       const response = await postGenerate(request);
 
-      // Map the inline GenerateResponse onto the ExperimentResult shape
-      // that the experiment viewer page and visualization components expect.
       const result: ExperimentResult = {
         experiment_id: response.experiment_id,
         prompt: response.prompt,
         mode: response.mode,
-        // generated_text from response maps to generated_code on ExperimentResult
         generated_code: response.generated_text,
         steps: response.steps,
         total_steps: response.total_steps,
@@ -52,20 +47,22 @@ export function useGeneration(): UseGenerationReturn {
         created_at: new Date().toISOString(),
       };
 
-      setExperiment(result);
-
-      // When the backend signals a partial/error result, surface the message
-      // but still show whatever was generated (status="done" with error toast).
-      if (response.status === "error" && response.message) {
-        setError(`Generation error (partial results shown): ${response.message}`);
-        setStatus("done"); // still "done" so the UI renders the partial results
-      } else {
-        setStatus("done");
+      // Final client-side guard — never show visualization with empty trace.
+      if (result.steps.length === 0 || result.total_steps === 0) {
+        throw new Error(
+          "Backend returned HTTP 201 but decoding trace is empty. " +
+            "This should not happen — check backend logs."
+        );
       }
+
+      setExperiment(result);
+      setStatus("done");
       return response.experiment_id;
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);
+      console.error("[useGeneration] failed:", message);
       setError(message);
+      setExperiment(null);
       setStatus("error");
       return null;
     }
