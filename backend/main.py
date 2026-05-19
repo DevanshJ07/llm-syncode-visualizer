@@ -20,6 +20,7 @@ from fastapi.middleware.cors import CORSMiddleware
 
 from app.api.routes import generate as generate_router
 from app.api.routes import experiments as experiments_router
+from app.api.routes import debug as debug_router
 from app.core.config import settings
 from app.services.llm_service import llm_service
 
@@ -65,6 +66,7 @@ app.add_middleware(
 # ---------------------------------------------------------------------------
 app.include_router(generate_router.router, tags=["Generation"])
 app.include_router(experiments_router.router, tags=["Experiments"])
+app.include_router(debug_router.router, tags=["Debug"])
 
 
 @app.get("/health", tags=["Meta"])
