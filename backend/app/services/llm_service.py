@@ -11,6 +11,10 @@ import torch.nn.functional as F
 
 from app.core.config import settings
 from app.models.schemas import DecodingStep, MaskedTokenEntry, TokenCandidate, TopToken
+from app.services.generation_validation import (
+    GenerationFailedError,
+    validate_generation_result,
+)
 
 if TYPE_CHECKING:
     from transformers import PreTrainedModel, PreTrainedTokenizerBase
@@ -1383,6 +1387,22 @@ class LLMService:
         _generation_id = str(_uuid.uuid4())[:8]
         _trace_steps: list[dict] = []
 
+        early_termination: str | None = None
+
+        log.info(
+            "[GEN loop entry] gen_id=%s mode=%s max_new_tokens=%d top_k=%d "
+            "T=%.2f do_sample=%s top_p=%.2f rep_pen=%.2f syncode=%s prompt_len=%d",
+            _generation_id,
+            "syncode" if effective_syncode else "raw",
+            max_new_tokens,
+            top_k,
+            temperature,
+            do_sample,
+            top_p,
+            repetition_penalty,
+            effective_syncode,
+            len(prompt),
+        )
         print(
             f"[TRACE start] gen_id={_generation_id} "
             f"mode={'syncode' if effective_syncode else 'raw'} "
@@ -1482,6 +1502,15 @@ class LLMService:
                 steps.append(step)
                 generated_ids.append(selected_id)
 
+                if step_idx == 0:
+                    log.info(
+                        "[GEN first token] gen_id=%s token=%r id=%d source=%s",
+                        _generation_id,
+                        step.selected_token,
+                        selected_id,
+                        step.selection_source,
+                    )
+
                 # ── Build per-step trace record ─────────────────────────────
                 trace_step: dict = {  # noqa: RUF012
                     "step": step_idx + 1,
@@ -1556,7 +1585,12 @@ class LLMService:
                 )
 
                 if selected_id in eos_ids:
-                    log.debug("EOS reached at step %d", step_idx + 1)
+                    early_termination = f"eos_at_step_{step_idx + 1}"
+                    log.info(
+                        "[GEN early termination] gen_id=%s reason=%s",
+                        _generation_id,
+                        early_termination,
+                    )
                     print(f"[TRACE] EOS at step {step_idx + 1}", flush=True)
                     break
 
@@ -1571,10 +1605,14 @@ class LLMService:
                         and whitespace_stall_step_num is None
                     ):
                         whitespace_stall_step_num = step_idx + 1
+                        early_termination = (
+                            f"whitespace_stall_at_step_{whitespace_stall_step_num}"
+                        )
                         log.warning(
-                            "Whitespace stall detected at step %d "
-                            "(%d consecutive whitespace tokens) — stopping generation.",
-                            whitespace_stall_step_num,
+                            "[GEN early termination] gen_id=%s reason=%s "
+                            "(%d consecutive whitespace tokens)",
+                            _generation_id,
+                            early_termination,
                             consecutive_whitespace_count,
                         )
                         break
@@ -1595,17 +1633,26 @@ class LLMService:
                 all_input_ids = torch.cat([all_input_ids, next_input], dim=1)
 
         except Exception as exc:
-            # Any unexpected exception in the generation loop is caught here.
-            # We return whatever tokens were generated before the failure so
-            # the API always returns a valid (possibly partial) response.
             log.error(
-                "Generation loop failed at step %d/%d: %s — returning %d partial tokens",
+                "[GEN loop exception] gen_id=%s step=%d/%d steps_so_far=%d: %s",
+                _generation_id,
                 step_idx + 1 if "step_idx" in dir() else 0,
                 max_new_tokens,
-                exc,
                 len(steps),
+                exc,
                 exc_info=True,
             )
+            raise GenerationFailedError(
+                f"Generation loop raised {type(exc).__name__}: {exc}",
+                reasons=[f"exception: {type(exc).__name__}: {exc}"],
+                generation_id=_generation_id,
+                early_termination="exception_in_loop",
+                step_count=len(steps),
+                trace_step_count=len(_trace_steps),
+            ) from exc
+
+        if early_termination is None and len(steps) >= max_new_tokens:
+            early_termination = f"max_new_tokens_reached_{max_new_tokens}"
 
         generated_text: str = self._tokenizer.decode(  # type: ignore[union-attr]
             generated_ids,
@@ -1658,9 +1705,28 @@ class LLMService:
                 "effective_syncode": effective_syncode,
                 "steps": _trace_steps,
                 "summary": summary,
+                "early_termination": early_termination,
             })
 
-        log.debug("Generation complete: %d tokens", len(steps))
+        log.info(
+            "[GEN complete] gen_id=%s final_step_count=%d trace_steps=%d "
+            "early_termination=%s generated_text_len=%d preview=%r",
+            _generation_id,
+            len(steps),
+            len(_trace_steps),
+            early_termination,
+            len(generated_text),
+            generated_text[:80],
+        )
+
+        validate_generation_result(
+            generated_text,
+            steps,
+            _trace_steps,
+            generation_id=_generation_id,
+            early_termination=early_termination,
+        )
+
         return generated_text, steps
 
 

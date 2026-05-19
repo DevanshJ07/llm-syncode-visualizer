@@ -49,7 +49,12 @@ export default function HomePage() {
   const [showForm, setShowForm] = useState(true);
 
   const isLoading = status === "generating";
-  const hasResult = status === "done" && experiment !== null;
+  const hasError = status === "error" && error !== null;
+  const hasResult =
+    status === "done" &&
+    experiment !== null &&
+    experiment.steps.length > 0 &&
+    experiment.total_steps > 0;
 
   // Reset step index whenever a new experiment arrives
   useEffect(() => {
@@ -106,6 +111,24 @@ export default function HomePage() {
         : "—",
     };
   }, [experiment]);
+
+  // ── ERROR: show form with backend error (no stale visualization) ───────
+  if (hasError && !isLoading) {
+    return (
+      <div className="mx-auto flex max-w-2xl flex-col gap-6">
+        <div>
+          <h1 className="text-2xl font-bold text-[#e6edf3]">Generate &amp; Visualize</h1>
+          <p className="mt-1 text-sm text-[#8b949e]">
+            Generation failed. The error below is from the backend — no placeholder
+            output is shown.
+          </p>
+        </div>
+        <Card>
+          <PromptForm onSubmit={handleGenerate} isLoading={isLoading} error={error} />
+        </Card>
+      </div>
+    );
+  }
 
   // ── PRE-GENERATION: full-width prompt form ──────────────────────────────
   if (!hasResult && !isLoading) {
@@ -229,10 +252,16 @@ export default function HomePage() {
               up to step {currentStep + 1}
             </span>
           </div>
-          <CodeViewer
-            code={visibleCode || "// (start)"}
-            className="min-h-40 max-h-[50vh]"
-          />
+          {visibleCode ? (
+            <CodeViewer
+              code={visibleCode}
+              className="min-h-40 max-h-[50vh]"
+            />
+          ) : (
+            <div className="flex min-h-40 items-center justify-center rounded-md border border-accent-red/30 bg-red-900/10 px-4 text-sm text-accent-red">
+              No token data for step {currentStep + 1} — trace may be corrupt.
+            </div>
+          )}
         </section>
 
         {/* Active step detail */}
