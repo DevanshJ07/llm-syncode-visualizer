@@ -136,10 +136,10 @@ export default function HomePage() {
       <div className="mx-auto flex max-w-2xl flex-col gap-6">
         <div>
           <h1 className="text-2xl font-bold text-[#e6edf3]">Generate &amp; Visualize</h1>
-          <p className="mt-1 text-sm text-[#8b949e]">
-            TinyLlama-1.1B generates tokens one-by-one. Every step is logged —
-            probabilities, entropy, top-k candidates — so you can inspect the
-            full decoding trace interactively.
+          <p className="mt-1 text-sm leading-relaxed text-[#8b949e]">
+            Qwen2.5-Coder generates code token-by-token with full decoding traces.
+            Toggle Syncode C-grammar masking to compare raw vs constrained distributions,
+            entropy shifts, and masked-token forensics at every step.
           </p>
         </div>
         <Card>
@@ -147,10 +147,10 @@ export default function HomePage() {
         </Card>
         <div className="grid grid-cols-2 gap-3 text-xs text-[#484f58] sm:grid-cols-4">
           {[
-            ["Model", "TinyLlama-1.1B"],
+            ["Model", "Qwen2.5-Coder"],
             ["Runtime", "CPU · fp32"],
-            ["Generation", "Greedy (argmax)"],
-            ["Syncode", "Phase 3"],
+            ["Decoding", "Nucleus + trace"],
+            ["Syncode", "C grammar mask"],
           ].map(([k, v]) => (
             <div key={k} className="rounded-md border border-surface-border bg-surface-raised p-2">
               <p className="text-[#484f58]">{k}</p>
@@ -168,9 +168,8 @@ export default function HomePage() {
       <div className="flex flex-col items-center gap-6 py-32">
         <Spinner size="lg" label="Generating tokens…" />
         <p className="max-w-sm text-center text-xs text-[#484f58]">
-          TinyLlama is generating token-by-token on CPU.
-          First run downloads the model (~2.2 GB) and may take a few minutes.
-          Subsequent runs are faster.
+          Qwen2.5-Coder-1.5B-Instruct is generating on CPU.
+          First run downloads weights (~3 GB); Syncode DFA build adds ~30 s once.
         </p>
         <Button variant="ghost" size="sm" onClick={reset}>
           Cancel
@@ -185,7 +184,7 @@ export default function HomePage() {
   const activeStep = experiment.steps[currentStep];
 
   return (
-    <div className="flex flex-col gap-5">
+    <div className="flex flex-col gap-3">
 
       {/* ── Compact re-generate strip ─────────────────────────────────── */}
       <div className="flex items-center gap-3 rounded-md border border-surface-border bg-surface-raised px-4 py-2">
@@ -220,30 +219,30 @@ export default function HomePage() {
 
       {/* ── Stats strip ───────────────────────────────────────────────── */}
       {stats && (
-        <div className="grid grid-cols-2 gap-3 sm:grid-cols-4">
+        <div className="grid grid-cols-2 gap-2 sm:grid-cols-4">
           {[
             { label: "Tokens", value: experiment.total_steps },
             { label: "Avg entropy", value: stats.avgEntropy, title: "Mean H = -Σp·log(p)" },
             { label: "Max entropy", value: stats.maxEntropy, title: "Most uncertain step" },
-            { label: "Avg top-1 p", value: stats.avgTopProb, title: "Mean greedy confidence" },
+            { label: "Avg top-1 p", value: stats.avgTopProb, title: "Mean top-1 probability" },
           ].map(({ label, value, title }) => (
             <div
               key={label}
               title={title}
-              className="rounded-md border border-surface-border bg-surface-raised px-3 py-2"
+              className="rounded-md border border-surface-border bg-surface-raised px-2.5 py-1.5"
             >
               <p className="text-[10px] uppercase tracking-wider text-[#484f58]">{label}</p>
-              <p className="mt-0.5 font-mono text-lg font-semibold text-[#e6edf3]">{value}</p>
+              <p className="mt-0.5 font-mono text-base font-semibold text-[#e6edf3]">{value}</p>
             </div>
           ))}
         </div>
       )}
 
-      {/* ── Main split: code (left) + step detail (right) ─────────────── */}
-      <div className="grid gap-5 lg:grid-cols-2">
+      {/* ── Main split: code (narrow) + step detail / forensic (wide) ─ */}
+      <div className="grid gap-3 lg:grid-cols-12">
 
         {/* Generated code — shows text built up to currentStep */}
-        <section className="flex flex-col gap-2">
+        <section className="flex flex-col gap-1.5 lg:col-span-4">
           <div className="flex items-center gap-2">
             <h2 className="text-xs font-semibold uppercase tracking-wider text-[#8b949e]">
               Generated Output
@@ -255,7 +254,7 @@ export default function HomePage() {
           {visibleCode ? (
             <CodeViewer
               code={visibleCode}
-              className="min-h-40 max-h-[50vh]"
+              className="min-h-32 max-h-[42vh]"
             />
           ) : (
             <div className="flex min-h-40 items-center justify-center rounded-md border border-accent-red/30 bg-red-900/10 px-4 text-sm text-accent-red">
@@ -264,13 +263,13 @@ export default function HomePage() {
           )}
         </section>
 
-        {/* Active step detail */}
-        <section className="flex flex-col gap-2">
+        {/* Active step detail — wider forensic panel */}
+        <section className="flex flex-col gap-1.5 lg:col-span-8">
           <h2 className="text-xs font-semibold uppercase tracking-wider text-[#8b949e]">
-            Step Detail
+            Step Detail — Syncode Forensics
           </h2>
           {activeStep ? (
-            <div className="overflow-y-auto max-h-[50vh] rounded-md border border-surface-border bg-surface-raised p-4">
+            <div className="overflow-y-auto max-h-[42vh] rounded-md border border-surface-border bg-surface-raised p-3">
               <StepViewer step={activeStep} />
             </div>
           ) : (
@@ -293,7 +292,7 @@ export default function HomePage() {
       />
 
       {/* ── Entropy chart ─────────────────────────────────────────────── */}
-      <div className="rounded-md border border-surface-border bg-surface-raised px-4 py-3">
+      <div className="rounded-md border border-surface-border bg-surface-raised px-3 py-2">
         <EntropyChart
           steps={experiment.steps}
           activeStep={currentStep}
@@ -302,7 +301,7 @@ export default function HomePage() {
       </div>
 
       {/* ── Full decoding timeline ────────────────────────────────────── */}
-      <section className="flex flex-col gap-2">
+      <section className="flex flex-col gap-1.5">
         <h2 className="text-xs font-semibold uppercase tracking-wider text-[#8b949e]">
           Decoding Timeline — {experiment.total_steps} step{experiment.total_steps !== 1 ? "s" : ""}
         </h2>

@@ -50,18 +50,23 @@ function EntropyBar({ value, label }: { value: number; label?: string }) {
   const pct = Math.min((value / MAX_H) * 100, 100);
   const col = entropyColor(value);
   return (
-    <div className="flex flex-col gap-1">
+    <div className="flex flex-col gap-0.5">
       {label && (
-        <span className="text-[10px] uppercase tracking-wider text-[#484f58]">{label}</span>
+        <span className="text-[11px] font-medium uppercase tracking-wider text-[#8b949e]">
+          {label}
+        </span>
       )}
       <div className="flex items-center gap-2">
-        <div className="relative h-2 flex-1 overflow-hidden rounded-full bg-[#21262d]">
+        <div className="relative h-2.5 flex-1 overflow-hidden rounded-full bg-[#21262d]">
           <div
             className="absolute left-0 top-0 h-full rounded-full transition-all duration-300"
             style={{ width: `${pct}%`, background: col }}
           />
         </div>
-        <span className="w-14 text-right font-mono text-[11px]" style={{ color: col }}>
+        <span
+          className="w-16 text-right font-mono text-sm font-semibold tabular-nums"
+          style={{ color: col }}
+        >
           {value.toFixed(3)}
         </span>
       </div>
@@ -83,14 +88,14 @@ function ProbTable({
 }) {
   const display = rows.slice(0, maxRows);
   return (
-    <div className="max-h-64 overflow-y-auto rounded border border-[#21262d]">
-      <table className="w-full border-collapse font-mono text-[11px]">
-        <thead className="sticky top-0 bg-[#0d1117]">
-          <tr className="border-b border-[#21262d] text-left text-[#484f58]">
-            <th className="px-2 py-1 font-medium">#</th>
-            <th className="px-2 py-1 font-medium">token</th>
-            <th className="px-2 py-1 font-medium">id</th>
-            <th className="px-2 py-1 text-right font-medium">prob</th>
+    <div className="max-h-52 overflow-y-auto overflow-x-auto rounded border border-[#21262d]">
+      <table className="w-full min-w-[280px] border-collapse font-mono text-[13px]">
+        <thead className="sticky top-0 z-10 bg-[#0d1117]">
+          <tr className="border-b border-[#21262d] text-left text-[11px] text-[#8b949e]">
+            <th className="px-2.5 py-1.5 font-semibold">#</th>
+            <th className="px-2.5 py-1.5 font-semibold">token</th>
+            <th className="px-2.5 py-1.5 font-semibold">id</th>
+            <th className="px-2.5 py-1.5 text-right font-semibold">prob</th>
           </tr>
         </thead>
         <tbody>
@@ -102,18 +107,31 @@ function ProbTable({
                 key={`${t.token_id}-${rank}`}
                 className={cn(
                   "border-b border-[#21262d]/50 transition-colors",
-                  isSel && "bg-blue-900/20",
-                  isMasked && !isSel && "opacity-50",
+                  isSel && "bg-blue-900/25",
+                  isMasked && !isSel && "opacity-55",
                 )}
               >
-                <td className="px-2 py-0.5 text-[#484f58]">{rank + 1}</td>
-                <td className={cn("px-2 py-0.5", isSel && "text-[#58a6ff]", isMasked && !isSel && "text-[#f85149] line-through")}>
+                <td className="px-2.5 py-1 text-[#8b949e]">{rank + 1}</td>
+                <td
+                  className={cn(
+                    "px-2.5 py-1",
+                    isSel && "font-medium text-[#58a6ff]",
+                    isMasked && !isSel && "text-[#f85149] line-through",
+                  )}
+                >
                   {JSON.stringify(t.token)}
-                  {isSel && <span className="ml-1 text-[9px]">✓</span>}
-                  {isMasked && !isSel && <span className="ml-1 text-[9px]">✗</span>}
+                  {isSel && <span className="ml-1 text-[10px]">✓</span>}
+                  {isMasked && !isSel && <span className="ml-1 text-[10px]">✗</span>}
                 </td>
-                <td className="px-2 py-0.5 text-[#484f58]">{t.token_id}</td>
-                <td className="px-2 py-0.5 text-right text-[#8b949e]">{formatPct(t.probability, 3)}</td>
+                <td className="px-2.5 py-1 text-[#8b949e]">{t.token_id}</td>
+                <td
+                  className={cn(
+                    "px-2.5 py-1 text-right tabular-nums",
+                    isSel ? "font-semibold text-[#e6edf3]" : "text-[#c9d1d9]",
+                  )}
+                >
+                  {formatPct(t.probability, 3)}
+                </td>
               </tr>
             );
           })}
@@ -127,37 +145,39 @@ function ProbTable({
 function MaskedTokensPanel({ tokens }: { tokens: MaskedTokenEntry[] }) {
   if (tokens.length === 0) return null;
   return (
-    <div className="flex flex-col gap-2">
+      <div className="flex flex-col gap-1.5">
       <div className="flex items-center gap-2">
-        <p className="text-[11px] font-semibold uppercase tracking-wider text-[#f85149]">
+        <p className="text-xs font-bold uppercase tracking-wider text-[#f85149]">
           ✗ Masked Tokens
         </p>
-        <span className="font-mono text-[10px] text-[#484f58]">
+        <span className="font-mono text-[11px] text-[#8b949e]">
           top-{tokens.length} rejected by C grammar
         </span>
       </div>
-      <div className="max-h-48 overflow-y-auto rounded border border-[#f85149]/20 bg-red-900/5">
-        <table className="w-full border-collapse font-mono text-[11px]">
-          <thead className="sticky top-0 bg-[#160a0a]">
-            <tr className="border-b border-[#f85149]/20 text-left text-[#f85149]/60">
-              <th className="px-2 py-1 font-medium">#</th>
-              <th className="px-2 py-1 font-medium">token</th>
-              <th className="px-2 py-1 font-medium">id</th>
-              <th className="px-2 py-1 text-right font-medium">raw prob</th>
-              <th className="px-2 py-1 font-medium">reason</th>
+      <div className="max-h-44 overflow-y-auto overflow-x-auto rounded border border-[#f85149]/25 bg-red-900/8">
+        <table className="w-full min-w-[320px] border-collapse font-mono text-[13px]">
+          <thead className="sticky top-0 z-10 bg-[#160a0a]">
+            <tr className="border-b border-[#f85149]/25 text-left text-[11px] text-[#f85149]/80">
+              <th className="px-2.5 py-1.5 font-semibold">#</th>
+              <th className="px-2.5 py-1.5 font-semibold">token</th>
+              <th className="px-2.5 py-1.5 font-semibold">id</th>
+              <th className="px-2.5 py-1.5 text-right font-semibold">raw prob</th>
+              <th className="px-2.5 py-1.5 font-semibold">reason</th>
             </tr>
           </thead>
           <tbody>
             {tokens.map((t, i) => (
               <tr
                 key={`${t.token_id}-${i}`}
-                className="border-b border-[#f85149]/10 text-[#f85149]/80"
+                className="border-b border-[#f85149]/10 text-[#f85149]/90"
               >
-                <td className="px-2 py-0.5 text-[#f85149]/40">{i + 1}</td>
-                <td className="px-2 py-0.5 line-through">{JSON.stringify(t.token)}</td>
-                <td className="px-2 py-0.5 text-[#f85149]/40">{t.token_id}</td>
-                <td className="px-2 py-0.5 text-right">{formatPct(t.raw_prob, 3)}</td>
-                <td className="px-2 py-0.5 text-[10px] text-[#f85149]/50">invalid C</td>
+                <td className="px-2.5 py-1 text-[#f85149]/50">{i + 1}</td>
+                <td className="px-2.5 py-1 line-through">{JSON.stringify(t.token)}</td>
+                <td className="px-2.5 py-1 text-[#f85149]/50">{t.token_id}</td>
+                <td className="px-2.5 py-1 text-right font-medium tabular-nums">
+                  {formatPct(t.raw_prob, 3)}
+                </td>
+                <td className="px-2.5 py-1 text-[11px] text-[#f85149]/60">invalid C</td>
               </tr>
             ))}
           </tbody>
@@ -167,6 +187,9 @@ function MaskedTokensPanel({ tokens }: { tokens: MaskedTokenEntry[] }) {
   );
 }
 
+/** Key Syncode forensic metrics — visually emphasized in the metrics grid. */
+const HIGHLIGHT_METRICS = new Set(["Valid", "Masked %", "Mass removed", "ΔH"]);
+
 /** Syncode impact metrics card — vocab size, valid/masked counts, prob mass, entropy delta. */
 function SyncodeMetricsCard({ step }: { step: DecodingStep }) {
   const maskCol = maskSeverityColor(step.masked_percentage);
@@ -175,7 +198,13 @@ function SyncodeMetricsCard({ step }: { step: DecodingStep }) {
       ? step.entropy_after - step.entropy_before
       : null;
 
-  const metrics: { label: string; value: string; color?: string; title?: string }[] = [
+  const metrics: {
+    label: string;
+    value: string;
+    color?: string;
+    title?: string;
+    highlight?: boolean;
+  }[] = [
     {
       label: "Vocab",
       value: step.vocab_size.toLocaleString(),
@@ -186,6 +215,7 @@ function SyncodeMetricsCard({ step }: { step: DecodingStep }) {
       value: step.valid_token_count.toLocaleString(),
       color: "#3fb950",
       title: "Tokens surviving grammar masking",
+      highlight: true,
     },
     {
       label: "Masked",
@@ -198,12 +228,14 @@ function SyncodeMetricsCard({ step }: { step: DecodingStep }) {
       value: `${step.masked_percentage.toFixed(1)}%`,
       color: maskCol,
       title: "Percentage of vocabulary rejected",
+      highlight: true,
     },
     {
       label: "Mass removed",
       value: formatPct(step.probability_mass_removed, 2),
       color: "#d29922",
       title: "Raw probability mass of rejected tokens",
+      highlight: true,
     },
     ...(entropyDelta !== null
       ? [
@@ -212,28 +244,49 @@ function SyncodeMetricsCard({ step }: { step: DecodingStep }) {
             value: entropyDelta.toFixed(3),
             color: entropyDelta < 0 ? "#3fb950" : "#f85149",
             title: "Entropy change: negative = more focused distribution",
+            highlight: true,
           },
         ]
       : []),
   ];
 
   return (
-    <div className="rounded-md border border-[#21262d] bg-[#0d1117] p-3">
-      <p className="mb-2 text-[10px] uppercase tracking-wider text-[#484f58]">
+    <div className="rounded-md border border-[#30363d] bg-[#0d1117] p-2.5">
+      <p className="mb-2 text-[11px] font-semibold uppercase tracking-wider text-[#8b949e]">
         Syncode Impact — Step {step.step}
       </p>
       <div className="grid grid-cols-3 gap-2 sm:grid-cols-6">
-        {metrics.map((m) => (
-          <div key={m.label} className="flex flex-col gap-0.5" title={m.title}>
-            <span className="text-[9px] uppercase tracking-wider text-[#484f58]">{m.label}</span>
-            <span
-              className="font-mono text-[13px] font-semibold"
-              style={{ color: m.color ?? "#e6edf3" }}
+        {metrics.map((m) => {
+          const emphasized = m.highlight ?? HIGHLIGHT_METRICS.has(m.label);
+          return (
+            <div
+              key={m.label}
+              className={cn(
+                "flex flex-col gap-0.5 rounded px-1.5 py-1",
+                emphasized && "bg-[#161b22] ring-1 ring-[#30363d]",
+              )}
+              title={m.title}
             >
-              {m.value}
-            </span>
-          </div>
-        ))}
+              <span
+                className={cn(
+                  "uppercase tracking-wider text-[#8b949e]",
+                  emphasized ? "text-[10px] font-semibold" : "text-[9px]",
+                )}
+              >
+                {m.label}
+              </span>
+              <span
+                className={cn(
+                  "font-mono tabular-nums",
+                  emphasized ? "text-base font-bold" : "text-sm font-semibold",
+                )}
+                style={{ color: m.color ?? "#e6edf3" }}
+              >
+                {m.value}
+              </span>
+            </div>
+          );
+        })}
       </div>
     </div>
   );
@@ -281,20 +334,24 @@ export function StepViewer({ step }: Props) {
   const selectedId = step.selected_token_id;
 
   return (
-    <div className="flex flex-col gap-4">
+    <div className="flex flex-col gap-2.5">
 
       {/* ── Header ────────────────────────────────────────────────────────── */}
       <div className="flex flex-wrap items-center gap-2">
-        <span className="text-[10px] uppercase tracking-wider text-[#484f58]">Step {step.step}</span>
+        <span className="text-[11px] font-semibold uppercase tracking-wider text-[#8b949e]">
+          Step {step.step}
+        </span>
         <Badge variant="selected">{JSON.stringify(step.selected_token)}</Badge>
-        <span className="font-mono text-[10px] text-[#484f58]">id&nbsp;{step.selected_token_id}</span>
+        <span className="font-mono text-xs text-[#8b949e]">id&nbsp;{step.selected_token_id}</span>
         {isSyncodeMode && <Badge variant="info">Syncode</Badge>}
         {step.num_masked > 0 && (
           <Badge variant="masked">{step.num_masked.toLocaleString()} masked</Badge>
         )}
-        <span className="ml-auto font-mono text-[10px] text-[#484f58]">
+        <span className="ml-auto font-mono text-xs text-[#8b949e]">
           top-1&nbsp;p&nbsp;=&nbsp;
-          <span className="text-[#e6edf3]">{formatPct(step.top_tokens[0]?.probability ?? 0, 2)}</span>
+          <span className="font-semibold text-[#e6edf3]">
+            {formatPct(step.top_tokens[0]?.probability ?? 0, 2)}
+          </span>
         </span>
       </div>
 
@@ -321,14 +378,14 @@ export function StepViewer({ step }: Props) {
           <SyncodeMetricsCard step={step} />
 
           {/* Entropy comparison */}
-          <div className="rounded-md border border-[#21262d] bg-[#0d1117] p-3 flex flex-col gap-3">
+          <div className="flex flex-col gap-2 rounded-md border border-[#21262d] bg-[#0d1117] p-2.5">
             <div className="flex items-center gap-2">
-              <span className="text-[10px] uppercase tracking-wider text-[#484f58]">
+              <span className="text-[11px] font-semibold uppercase tracking-wider text-[#8b949e]">
                 Entropy — H = −Σ p·log(p)
               </span>
               {step.entropy_before !== null && step.entropy_after !== null && (
                 <span
-                  className="ml-auto font-mono text-[11px] font-semibold"
+                  className="ml-auto rounded bg-[#161b22] px-2 py-0.5 font-mono text-sm font-bold tabular-nums"
                   title="Entropy change from grammar masking (negative = more focused)"
                   style={{
                     color: step.entropy_after < step.entropy_before ? "#3fb950" : "#f85149",
@@ -347,14 +404,14 @@ export function StepViewer({ step }: Props) {
           </div>
 
           {/* Side-by-side: BEFORE | AFTER */}
-          <div className="grid gap-4 lg:grid-cols-2">
+          <div className="grid gap-2.5 lg:grid-cols-2">
             {/* BEFORE SYNCODE */}
-            <div className="flex flex-col gap-3 rounded-md border border-[#21262d] bg-[#0d1117] p-3">
+            <div className="flex flex-col gap-2 rounded-md border border-[#21262d] bg-[#0d1117] p-2.5">
               <div className="flex items-center justify-between">
-                <p className="text-[11px] font-semibold uppercase tracking-wider text-[#8b949e]">
+                <p className="text-xs font-bold uppercase tracking-wider text-[#8b949e]">
                   Before Syncode
                 </p>
-                <span className="font-mono text-[10px] text-[#484f58]">raw distribution</span>
+                <span className="font-mono text-[11px] text-[#8b949e]">raw distribution</span>
               </div>
               <TokenProbabilityChart
                 candidates={beforeTopTokens.length > 0 ? beforeTopTokens : step.top_tokens}
@@ -373,12 +430,12 @@ export function StepViewer({ step }: Props) {
             </div>
 
             {/* AFTER SYNCODE */}
-            <div className="flex flex-col gap-3 rounded-md border border-[#58a6ff]/20 bg-[#0d1117] p-3">
+            <div className="flex flex-col gap-2 rounded-md border border-[#58a6ff]/30 bg-[#0d1117] p-2.5">
               <div className="flex items-center justify-between">
-                <p className="text-[11px] font-semibold uppercase tracking-wider text-[#58a6ff]">
+                <p className="text-xs font-bold uppercase tracking-wider text-[#58a6ff]">
                   After Syncode
                 </p>
-                <span className="font-mono text-[10px] text-[#484f58]">constrained distribution</span>
+                <span className="font-mono text-[11px] text-[#8b949e]">constrained distribution</span>
               </div>
               <TokenProbabilityChart
                 candidates={validAsTopTokens.length > 0 ? validAsTopTokens : step.top_tokens}
@@ -418,7 +475,7 @@ export function StepViewer({ step }: Props) {
         /* ── RAW MODE ────────────────────────────────────────────────────── */
         <>
           {step.entropy_before !== null && (
-            <div className="rounded-md border border-[#21262d] bg-[#0d1117] p-3">
+            <div className="rounded-md border border-[#21262d] bg-[#0d1117] p-2.5">
               <EntropyBar value={step.entropy_before} label="Entropy H = −Σ p·log(p)" />
             </div>
           )}

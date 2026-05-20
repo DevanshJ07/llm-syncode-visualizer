@@ -40,10 +40,10 @@ export function EntropyChart({ steps, activeStep, onStepClick }: Props) {
 
   return (
     <div className="flex flex-col gap-1">
-      <p className="text-[10px] uppercase tracking-wider text-[#484f58]">
+      <p className="text-[11px] font-medium uppercase tracking-wider text-[#8b949e]">
         Entropy across steps — H = −Σ p·log(p)
       </p>
-      <ResponsiveContainer width="100%" height={90}>
+      <ResponsiveContainer width="100%" height={80}>
         <LineChart
           data={data}
           margin={{ top: 8, right: 8, bottom: 0, left: 0 }}

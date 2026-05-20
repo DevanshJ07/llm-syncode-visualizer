@@ -103,7 +103,7 @@ export function TokenProbabilityChart({
             type="number"
             domain={[0, Math.max(...data.map((d) => d.pct)) * 1.1]}
             tickFormatter={(v) => formatPct(v, 0)}
-            tick={{ fill: "#484f58", fontSize: 10 }}
+            tick={{ fill: "#8b949e", fontSize: 11 }}
             axisLine={false}
             tickLine={false}
           />
@@ -111,7 +111,7 @@ export function TokenProbabilityChart({
             type="category"
             dataKey="label"
             width={96}
-            tick={{ fill: "#c9d1d9", fontSize: 11, fontFamily: "monospace" }}
+            tick={{ fill: "#e6edf3", fontSize: 12, fontFamily: "monospace" }}
             axisLine={false}
             tickLine={false}
           />
@@ -121,7 +121,7 @@ export function TokenProbabilityChart({
               background: "#161b22",
               border: "1px solid #21262d",
               borderRadius: 6,
-              fontSize: 12,
+              fontSize: 13,
               color: "#e6edf3",
             }}
             formatter={(
@@ -146,7 +146,7 @@ export function TokenProbabilityChart({
       </ResponsiveContainer>
 
       {/* Legend */}
-      <div className="flex flex-wrap gap-4 text-[10px] text-[#484f58]">
+      <div className="flex flex-wrap gap-3 text-[11px] text-[#8b949e]">
         <span className="flex items-center gap-1">
           <span className="inline-block h-2 w-2 rounded-sm bg-[#58a6ff]" />
           selected

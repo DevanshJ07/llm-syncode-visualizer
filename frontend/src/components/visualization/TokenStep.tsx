@@ -80,7 +80,7 @@ export function TokenStep({ step, isActive, onClick }: Props) {
         {/* Masking percentage (Syncode mode only) */}
         {hasMasking && (
           <span
-            className="shrink-0 font-mono text-[10px]"
+            className="shrink-0 font-mono text-xs font-semibold tabular-nums"
             title={`${step.masked_percentage.toFixed(1)}% of vocabulary masked by Syncode`}
             style={{ color: severityColor }}
           >
@@ -102,7 +102,7 @@ export function TokenStep({ step, isActive, onClick }: Props) {
         {/* Entropy display */}
         {step.entropy_before !== null && (
           <span
-            className="shrink-0 font-mono text-[10px]"
+            className="shrink-0 font-mono text-xs font-semibold tabular-nums"
             title="Shannon entropy of the full vocabulary distribution"
             style={{
               color: step.entropy_before < 2 ? "#3fb950" : step.entropy_before < 4 ? "#d29922" : "#f85149",
@@ -113,7 +113,7 @@ export function TokenStep({ step, isActive, onClick }: Props) {
         )}
 
         {/* Top probability */}
-        <span className="shrink-0 font-mono text-[10px] text-[#484f58]">
+        <span className="shrink-0 font-mono text-xs tabular-nums text-[#8b949e]">
           p={formatPct(topProb, 1)}
         </span>
 
@@ -124,22 +124,22 @@ export function TokenStep({ step, isActive, onClick }: Props) {
       {/* Expanded body: chart + probability table                             */}
       {/* ------------------------------------------------------------------ */}
       {expanded && (
-        <div className="border-t border-surface-border px-4 pb-4 pt-3 flex flex-col gap-4">
+        <div className="flex flex-col gap-2.5 border-t border-surface-border px-3 pb-3 pt-2">
           <TokenProbabilityChart
             candidates={step.top_tokens}
             selectedTokenId={step.selected_token_id}
             title={`Top ${step.top_tokens.length} candidates — step ${step.step}`}
           />
 
-          {/* Quick-read probability table */}
-          <div className="overflow-x-auto">
-            <table className="w-full border-collapse text-[11px] font-mono">
-              <thead>
-                <tr className="border-b border-surface-border text-left text-[#484f58]">
-                  <th className="pb-1 pr-3 font-medium">rank</th>
-                  <th className="pb-1 pr-3 font-medium">token</th>
-                  <th className="pb-1 pr-3 font-medium">id</th>
-                  <th className="pb-1 font-medium text-right">prob</th>
+          {/* Quick-read probability table — scrolls internally */}
+          <div className="max-h-40 overflow-y-auto overflow-x-auto rounded border border-surface-border">
+            <table className="w-full min-w-[260px] border-collapse font-mono text-[13px]">
+              <thead className="sticky top-0 bg-surface-raised">
+                <tr className="border-b border-surface-border text-left text-[11px] text-[#8b949e]">
+                  <th className="px-2.5 py-1.5 font-semibold">rank</th>
+                  <th className="px-2.5 py-1.5 font-semibold">token</th>
+                  <th className="px-2.5 py-1.5 font-semibold">id</th>
+                  <th className="px-2.5 py-1.5 text-right font-semibold">prob</th>
                 </tr>
               </thead>
               <tbody>
@@ -149,18 +149,18 @@ export function TokenStep({ step, isActive, onClick }: Props) {
                     <tr
                       key={t.token_id}
                       className={`border-b border-surface-border/40 ${
-                        isSelected ? "text-accent-blue" : "text-[#8b949e]"
+                        isSelected ? "bg-blue-900/20 text-accent-blue" : "text-[#c9d1d9]"
                       }`}
                     >
-                      <td className="py-0.5 pr-3 text-[#484f58]">{rank + 1}</td>
-                      <td className="py-0.5 pr-3">
+                      <td className="px-2.5 py-1 text-[#8b949e]">{rank + 1}</td>
+                      <td className="px-2.5 py-1 font-medium">
                         {JSON.stringify(t.token)}
                         {isSelected && (
-                          <span className="ml-1 text-[9px] text-accent-blue">✓</span>
+                          <span className="ml-1 text-[10px] text-accent-blue">✓</span>
                         )}
                       </td>
-                      <td className="py-0.5 pr-3 text-[#484f58]">{t.token_id}</td>
-                      <td className="py-0.5 text-right">
+                      <td className="px-2.5 py-1 text-[#8b949e]">{t.token_id}</td>
+                      <td className="px-2.5 py-1 text-right font-semibold tabular-nums">
                         {formatPct(t.probability, 3)}
                       </td>
                     </tr>
