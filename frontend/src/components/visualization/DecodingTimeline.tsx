@@ -51,7 +51,7 @@ export function DecodingTimeline({ steps, loading, onStepSelect }: Props) {
   const hasMaskingData = steps.some((s) => s.masked_percentage > 0);
 
   return (
-    <div className="flex flex-col gap-2">
+    <div className="flex max-h-[40vh] flex-col gap-1.5 overflow-y-auto pr-1">
       <div className="flex flex-wrap items-center gap-3">
         <p className="text-xs text-[#484f58]">
           {steps.length} decoding step{steps.length !== 1 ? "s" : ""} — click to expand
