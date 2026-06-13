@@ -5,16 +5,16 @@ SynViz is an interactive research-oriented platform for exploring how Large Lang
 The platform visualizes the complete generation process step-by-step, allowing users to inspect how Syncode grammar constraints modify token probabilities, suppress invalid continuations, and reshape the decoding trajectory in real time.
 
 Key Features
-Token-by-token generation tracing
-Raw vs Syncode-constrained decoding comparison
-Grammar-invalid token masking visualization
-Entropy tracking across decoding steps
-Token probability distribution inspection
-Interactive decoding timeline
-Constrained generation for C code synthesis
-FastAPI + React based research interface
-Why This Project?
+- Token-by-token generation tracing
+- Raw vs Syncode-constrained decoding comparison
+- Grammar-invalid token masking visualization
+- Entropy tracking across decoding steps
+- Token probability distribution inspection
+- Interactive decoding timeline
+- Constrained generation for C code synthesis
+- FastAPI + React based research interface
 
+Why This Project?
 Most LLM interfaces only show the final generated output.
 
 SynViz focuses on what happens between generated tokens.
