@@ -1,26 +1,47 @@
-# SynViz — LLM Syncode Visualizer
+SynViz — LLM Constrained Decoding Visualizer
 
-An interactive research platform for visualizing token-level generation of **Llama 3B**
-with and without **Syncode** constrained decoding for C code generation.
+SynViz is an interactive research-oriented platform for exploring how Large Language Models generate text at the token level under grammar-constrained decoding.
 
----
+The platform visualizes the complete generation process step-by-step, allowing users to inspect how Syncode grammar constraints modify token probabilities, suppress invalid continuations, and reshape the decoding trajectory in real time.
 
-## What It Does
+Key Features
+Token-by-token generation tracing
+Raw vs Syncode-constrained decoding comparison
+Grammar-invalid token masking visualization
+Entropy tracking across decoding steps
+Token probability distribution inspection
+Interactive decoding timeline
+Constrained generation for C code synthesis
+FastAPI + React based research interface
+Why This Project?
 
-At every autoregressive decoding step the platform captures:
+Most LLM interfaces only show the final generated output.
 
-| Data | Description |
-|---|---|
-| Top-k candidates | Token strings + probabilities before masking |
-| Syncode mask | Which tokens were marked grammar-invalid |
-| Post-mask distribution | Re-normalised probabilities after masking |
-| Selected token | The finally chosen token |
-| Entropy | Uncertainty before and after masking |
+SynViz focuses on what happens between generated tokens.
 
-Researchers can compare raw vs. constrained generation side-by-side, click
-into any decoding step, and see exactly how grammar constraints reshape the
-probability distribution.
+By exposing probability distributions, masked tokens, entropy evolution, and parser-aware constraints, the platform helps researchers, students, and engineers better understand how constrained decoding influences model behavior during inference.
 
+Technology Stack
+Backend
+Python
+FastAPI
+Hugging Face Transformers
+Syncode
+Pydantic
+Frontend
+Next.js
+React
+TypeScript
+Tailwind CSS
+Recharts
+Research Concepts
+Large Language Models (LLMs)
+Constrained Decoding
+Formal Grammars
+Incremental Parsing
+Token Probability Analysis
+Entropy-Based Uncertainty Measurement
+AI Interpretability
 ---
 
 ## Project Structure
