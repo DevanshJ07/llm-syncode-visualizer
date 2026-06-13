@@ -174,31 +174,6 @@ Each decoding step is stored as:
   "entropy_after": 0.45,
   "num_masked": 2
 }
-```
-
----
-
-## Implementation Priorities (Next Steps)
-
-### Phase 2 — Core Inference (Backend)
-1. Implement token-by-token generation loop in `llm_service.py` with logit capture
-2. Plug `syncode_service.py` into the HuggingFace logits-processor hook
-3. Capture `entropy_before` / `entropy_after` per step
-4. Write populated `DecodingStep` objects to experiment store
-
-### Phase 3 — Rich Visualization (Frontend)
-1. Syntax highlighting in `CodeViewer` (shiki or prism-react-renderer)
-2. Grouped before/after bars in `TokenProbabilityChart`
-3. Entropy timeline chart across all steps (Recharts LineChart)
-4. Step ↔ code line synchronisation
-5. React Flow grammar tree visualisation
-
-### Phase 4 — Polish
-1. Streaming generation (Server-Sent Events)
-2. Export experiment as JSON / CSV
-3. Persistent experiment browser with search
-4. Diff highlighting in compare view
-
 ---
 
 ## Notes for Researchers
