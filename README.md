@@ -21,27 +21,27 @@ SynViz focuses on what happens between generated tokens.
 
 By exposing probability distributions, masked tokens, entropy evolution, and parser-aware constraints, the platform helps researchers, students, and engineers better understand how constrained decoding influences model behavior during inference.
 
-Technology Stack
-Backend
-Python
-FastAPI
-Hugging Face Transformers
-Syncode
-Pydantic
-Frontend
-Next.js
-React
-TypeScript
-Tailwind CSS
-Recharts
-Research Concepts
-Large Language Models (LLMs)
-Constrained Decoding
-Formal Grammars
-Incremental Parsing
-Token Probability Analysis
-Entropy-Based Uncertainty Measurement
-AI Interpretability
+- Technology Stack
+- Backend
+- Python
+- FastAPI
+- Hugging Face Transformers
+- Syncode
+- Pydantic
+- Frontend
+- Next.js
+- React
+- TypeScript
+- Tailwind CSS
+- Recharts
+- Research Concepts
+- Large Language Models (LLMs)
+- Constrained Decoding
+- Formal Grammars
+- Incremental Parsing
+- Token Probability Analysis
+- Entropy-Based Uncertainty Measurement
+-AI Interpretability
 ---
 
 ## Project Structure
